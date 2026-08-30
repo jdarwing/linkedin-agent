@@ -1,0 +1,31 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Variables de entorno (nunca subir al repo)
+.env
+
+# Sesión de LinkedIn (contiene cookies sensibles)
+data/session.json
+data/weekly_count.json
+
+# Logs y datos generados
+logs/
+data/decisions.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
