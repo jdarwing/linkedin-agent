@@ -118,30 +118,52 @@ def login_and_save_session() -> None:
 
         page = context.new_page()
 
-        # ── 1. Navegar al login ────────────────────────────────────────────────
+        # ── 1. Ir directo al feed para detectar sesión activa ─────────────────
+        print("[auth] Verificando si ya hay sesión activa...")
         try:
-            page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=20_000)
+            page.goto(FEED_URL, wait_until="domcontentloaded", timeout=20_000)
         except PWTimeout:
             print("[ERROR] Timeout al cargar LinkedIn. Revisa tu conexión.")
             browser.close()
             sys.exit(1)
 
+        # Esperar redirecciones
+        try:
+            page.wait_for_load_state("networkidle", timeout=8_000)
+        except PWTimeout:
+            pass
+
         human_pause(1.5)
 
-        # Si ya hay una sesión activa (cookie previa cargada), saltar login
+        # Si llegamos al feed, ya estamos logueados
         if is_logged_in(page):
-            print("[auth] Ya hay una sesión activa. No es necesario loguearse.")
+            print("[auth] Sesión activa detectada — no es necesario loguearse.")
             _save_cookies(context, browser)
             return
 
+        # Si LinkedIn nos mandó a login, completar el formulario
+        print("[auth] Sin sesión activa. Iniciando login...")
+        try:
+            page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=20_000)
+            page.wait_for_load_state("networkidle", timeout=8_000)
+        except PWTimeout:
+            pass
+
+        human_pause(1.0)
+
         # ── 2. Completar formulario de login ──────────────────────────────────
         try:
+            page.wait_for_selector("#username", timeout=12_000)
             page.fill("#username", EMAIL)
             human_pause(0.8)
             page.fill("#password", PASSWORD)
             human_pause(0.6)
             page.click('[type="submit"]')
         except Exception as e:
+            if is_logged_in(page):
+                print("[auth] Sesión activa detectada.")
+                _save_cookies(context, browser)
+                return
             print(f"[ERROR] No se encontró el formulario de login: {e}")
             browser.close()
             sys.exit(1)
