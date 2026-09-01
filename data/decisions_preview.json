@@ -1,0 +1,112 @@
+[
+  {
+    "nombre": "Nathali Lorenzo",
+    "cargo": "Business Development & Partnerships en BE AND PAY",
+    "empresa": "",
+    "conexiones_comun": 17,
+    "profile_url": "https://www.linkedin.com/in/nathali-lorenzo-b434a119a",
+    "decision": "consult",
+    "score": 6,
+    "reason": "El perfil menciona desarrollo de negocios y asociaciones, pero no está directamente relacionado con el sector agroindustrial. Sin embargo, tiene una cantidad significativa de conexiones en común, lo que merece una consulta adicional para evaluar posibles sinergias o relevancia sectorial.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"El perfil menciona desarrollo de negocios y asociaciones, pero no está directamente relacionado con el sector agroindustrial. Sin embargo, tiene una cantidad significativa de conexiones en común, lo que merece una consulta adicional para evaluar posibles sinergias o relevancia sectorial.\"}"
+  },
+  {
+    "nombre": "Victor Gonzalez",
+    "cargo": "Commercial Manager WCSA at Zim Integrated Shipping Services",
+    "empresa": "",
+    "conexiones_comun": 50,
+    "profile_url": "https://www.linkedin.com/in/victor-gonzalez-b3148910",
+    "decision": "consult",
+    "score": 6,
+    "reason": "Victor trabaja en Zim Integrated Shipping Services, relevante para logística en agro-exportación. Tiene 50 conexiones en común, lo cual es una señal fuerte. Sin embargo, su expertise primaria no está directamente alineada con la agroindustria.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"Victor trabaja en Zim Integrated Shipping Services, relevante para logística en agro-exportación. Tiene 50 conexiones en común, lo cual es una señal fuerte. Sin embargo, su expertise primaria no está directamente alineada con la agroindustria.\"}"
+  },
+  {
+    "nombre": "IQUE POSSO SANCHEZ",
+    "cargo": "",
+    "empresa": "",
+    "conexiones_comun": 26,
+    "profile_url": "https://www.linkedin.com/in/ique-posso-sanchez-59b780343",
+    "decision": "consult",
+    "score": 6,
+    "reason": "Sin información específica sobre el sector o rol. Número alto de conexiones en común, lo que indica un potencial interés o relación relevante a evaluar.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"Sin información específica sobre el sector o rol. Número alto de conexiones en común, lo que indica un potencial interés o relación relevante a evaluar.\"}"
+  },
+  {
+    "nombre": "Carolina Fuentes Rivera Trucíos",
+    "cargo": "Exportación | Comercio Exterior | Logística | SCM | Clientes B2B | Incoterms 🌎👩🏽‍💻✈️⛴️",
+    "empresa": "",
+    "conexiones_comun": 8,
+    "profile_url": "https://www.linkedin.com/in/carolina-fuentes-rivera-trucios",
+    "decision": "consult",
+    "score": 6,
+    "reason": "El perfil de Carolina Fuentes Rivera Trucíos se centra en exportación, comercio exterior y logística, lo cual es relevante para una empresa agro-exportadora. Además, tiene un número significativo de conexiones en común (8), lo que sugiere una buena red profesional, pero no hay un enfoque claro en el sector agroindustrial o en productos específicos como uvas y arándanos. Recomiendo consultar para evaluar su potencial contribución y relevancia más a fondo.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"El perfil de Carolina Fuentes Rivera Trucíos se centra en exportación, comercio exterior y logística, lo cual es relevante para una empresa agro-exportadora. Además, tiene un número significativo de conexiones en común (8), lo que sugiere una buena red profesional, pero no hay un enfoque claro en el sector agroindustrial o en productos específicos como uvas y arándanos. Recomiendo consultar para evaluar su potencial contribución y relevancia más a fondo.\"}"
+  },
+  {
+    "nombre": "Andrea Bustos B.",
+    "cargo": "",
+    "empresa": "",
+    "conexiones_comun": 0,
+    "profile_url": "https://www.linkedin.com/in/andreabustosperiodista",
+    "decision": "ignore",
+    "score": 2,
+    "reason": "El perfil indica que es periodista, sin conexiones en común ni indicaciones de relación con el sector agroindustrial o áreas prioritarias para la empresa.",
+    "raw_response": "{\"decision\": \"ignore\", \"score\": 2, \"reason\": \"El perfil indica que es periodista, sin conexiones en común ni indicaciones de relación con el sector agroindustrial o áreas prioritarias para la empresa.\"}"
+  },
+  {
+    "nombre": "Karenly Vega",
+    "cargo": "Directora Comercial | Desarrollo de Negocios | Estrategia Comercial B2B | Liderazgo de Equipos Comerciales | Gestión Empresarial | Expansión y Desarrollo de Mercados",
+    "empresa": "",
+    "conexiones_comun": 11,
+    "profile_url": "https://www.linkedin.com/in/karenly-vega-054905124",
+    "decision": "consult",
+    "score": 6,
+    "reason": "El perfil indica un enfoque en estrategia comercial y liderazgo, lo que puede ser relevante indirectamente para el agro. Además, el alto número de conexiones en común sugiere un posible interés mutuo, pero el ámbito específico de agro-exportación o agroindustria no está claramente mencionado en el headline.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"El perfil indica un enfoque en estrategia comercial y liderazgo, lo que puede ser relevante indirectamente para el agro. Además, el alto número de conexiones en común sugiere un posible interés mutuo, pero el ámbito específico de agro-exportación o agroindustria no está claramente mencionado en el headline.\"}"
+  },
+  {
+    "nombre": "Bryam Antonio Caña Garcia",
+    "cargo": "Analista Legal | Derecho del consumidor y Competencia | Seguros",
+    "empresa": "",
+    "conexiones_comun": 3,
+    "profile_url": "https://www.linkedin.com/in/bryam-antonio-ca%C3%B1a-garcia-4889012aa",
+    "decision": "consult",
+    "score": 6,
+    "reason": "Tiene conexiones en común, lo que sugiere una posible red relevante. Sin embargo, su especialidad en derecho del consumidor y seguros no está directamente alineada con las prioridades agrícolas o agro-exportadoras, lo que requiere una consulta adicional para evaluar su potencial relevancia.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"Tiene conexiones en común, lo que sugiere una posible red relevante. Sin embargo, su especialidad en derecho del consumidor y seguros no está directamente alineada con las prioridades agrícolas o agro-exportadoras, lo que requiere una consulta adicional para evaluar su potencial relevancia.\"}"
+  },
+  {
+    "nombre": "Micaela Robles Revilla",
+    "cargo": "Analista de operaciones en CargoFlex S.A.C.",
+    "empresa": "",
+    "conexiones_comun": 8,
+    "profile_url": "https://www.linkedin.com/in/micaela-robles-revilla-001b1623a",
+    "decision": "consult",
+    "score": 6,
+    "reason": "Micaela tiene varias conexiones en común, lo cual es un indicador positivo, pero su posición actual en CargoFlex no se relaciona directamente con las prioridades del sector agro-exportador. Consultar para ver si existen otros vínculos relevantes con la industria.",
+    "raw_response": "{\"decision\": \"consult\", \"score\": 6, \"reason\": \"Micaela tiene varias conexiones en común, lo cual es un indicador positivo, pero su posición actual en CargoFlex no se relaciona directamente con las prioridades del sector agro-exportador. Consultar para ver si existen otros vínculos relevantes con la industria.\"}"
+  },
+  {
+    "nombre": "Harold Quinde Cueva",
+    "cargo": "Gerente General - Viru Frozen - Grupo Viru",
+    "empresa": "",
+    "conexiones_comun": 395,
+    "profile_url": "https://www.linkedin.com/in/harold-quinde-cueva-444739a6",
+    "decision": "accept",
+    "score": 8,
+    "reason": "Grupo Viru está en el sector agroindustrial, lo que es relevante para la red de contactos. Además, tiene un alto número de conexiones en común, lo que indica una fuerte posibilidad de red compartida y adicionalmente tiene un cargo de liderazgo.",
+    "raw_response": "{\"decision\": \"accept\", \"score\": 8, \"reason\": \"Grupo Viru está en el sector agroindustrial, lo que es relevante para la red de contactos. Además, tiene un alto número de conexiones en común, lo que indica una fuerte posibilidad de red compartida y adicionalmente tiene un cargo de liderazgo.\"}"
+  },
+  {
+    "nombre": "Digvijay Patil",
+    "cargo": "ALL INDIA GENERAL MANAGER AT NOVAFRESCO",
+    "empresa": "",
+    "conexiones_comun": 117,
+    "profile_url": "https://www.linkedin.com/in/digvijay-patil-05128b210",
+    "decision": "accept",
+    "score": 8,
+    "reason": "General Manager en una empresa relevante que podría estar en el sector agro-export, alto número de conexiones en común sugiere relevancia y potencial para networking.",
+    "raw_response": "{\"decision\": \"accept\", \"score\": 8, \"reason\": \"General Manager en una empresa relevante que podría estar en el sector agro-export, alto número de conexiones en común sugiere relevancia y potencial para networking.\"}"
+  }
+]

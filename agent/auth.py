@@ -53,8 +53,32 @@ def human_pause(seconds: float) -> None:
 
 
 def is_logged_in(page) -> bool:
-    """Comprueba si ya estamos en el feed (login exitoso)."""
-    return "feed" in page.url or "mynetwork" in page.url
+    """
+    Comprueba si la sesión está activa verificando tanto la URL
+    como la presencia de elementos del DOM que solo existen
+    cuando el usuario está autenticado.
+    """
+    url_ok = "feed" in page.url or "mynetwork" in page.url or "in/" in page.url
+    if not url_ok:
+        return False
+
+    # Verificar que hay elementos reales de sesión autenticada
+    # (la barra de navegación superior solo aparece cuando estás logueado)
+    for selector in [
+        "nav.global-nav",
+        ".global-nav__me",
+        "[data-control-name='identity_welcome_message']",
+        "a[href*='/feed/']",
+        "#global-nav",
+    ]:
+        try:
+            el = page.query_selector(selector)
+            if el:
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
 def wait_for_2fa(page, timeout_minutes: int = 3) -> bool:
@@ -133,16 +157,18 @@ def login_and_save_session() -> None:
         except PWTimeout:
             pass
 
-        human_pause(1.5)
+        human_pause(2.5)
 
-        # Si llegamos al feed, ya estamos logueados
+        # Verificar sesión real (URL + elementos DOM)
         if is_logged_in(page):
             print("[auth] Sesión activa detectada — no es necesario loguearse.")
             _save_cookies(context, browser)
             return
 
-        # Si LinkedIn nos mandó a login, completar el formulario
-        print("[auth] Sin sesión activa. Iniciando login...")
+        # Sin sesión válida → ir a login y pedir credenciales
+        print("[auth] Sin sesión activa. Abre el navegador y loguéate manualmente.")
+        print("[auth] Cuando estés en el feed de LinkedIn, presiona Enter aquí.")
+        print("[auth] Iniciando login...")
         try:
             page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=20_000)
             page.wait_for_load_state("networkidle", timeout=8_000)
@@ -151,43 +177,46 @@ def login_and_save_session() -> None:
 
         human_pause(1.0)
 
-        # ── 2. Completar formulario de login ──────────────────────────────────
+        # ── 2. Navegar al login y completar formulario ────────────────────────
         try:
-            page.wait_for_selector("#username", timeout=12_000)
+            page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded", timeout=20_000)
+            page.wait_for_load_state("networkidle", timeout=8_000)
+        except PWTimeout:
+            pass
+
+        human_pause(1.5)
+
+        # Intentar auto-login con credenciales del .env
+        try:
+            page.wait_for_selector("#username", timeout=8_000)
+            print("[auth] Formulario encontrado. Completando credenciales...")
             page.fill("#username", EMAIL)
             human_pause(0.8)
             page.fill("#password", PASSWORD)
             human_pause(0.6)
             page.click('[type="submit"]')
-        except Exception as e:
-            if is_logged_in(page):
-                print("[auth] Sesión activa detectada.")
-                _save_cookies(context, browser)
-                return
-            print(f"[ERROR] No se encontró el formulario de login: {e}")
-            browser.close()
-            sys.exit(1)
+            # Esperar resultado
+            human_pause(4.0)
+        except PWTimeout:
+            # El formulario no apareció — pedir login manual
+            print("\n[auth] No se encontró el formulario automáticamente.")
+            print("[auth] Por favor, loguéate manualmente en la ventana del navegador.")
 
-        # ── 3. Esperar resultado del login ────────────────────────────────────
-        human_pause(3)
-
-        current_url = page.url
-
-        if "checkpoint" in current_url or "challenge" in current_url or "security" in current_url:
-            # LinkedIn pidió verificación adicional (2FA, SMS, email, captcha)
+        # Manejar 2FA o verificación adicional
+        if "checkpoint" in page.url or "challenge" in page.url or "security" in page.url:
             success = wait_for_2fa(page)
             if not success:
                 print("\n[ERROR] Timeout de verificación. Vuelve a correr auth.py.")
                 browser.close()
                 sys.exit(1)
 
-        elif "feed" not in page.url and "mynetwork" not in page.url:
-            # Otro estado inesperado — mostrar URL para diagnóstico
-            print(f"\n[WARN] URL inesperada después del login: {page.url}")
-            print("       Verifica credenciales o completa cualquier verificación en el navegador.")
-            input("       Presiona Enter cuando estés en el feed de LinkedIn...")
+        # Si aún no estamos logueados, esperar login manual
+        if not is_logged_in(page):
+            print("\n[auth] Esperando que completes el login en el navegador...")
+            input("       → Cuando veas tu feed de LinkedIn, presiona Enter aquí: ")
+            human_pause(2.0)
 
-        # ── 4. Confirmar y guardar ─────────────────────────────────────────────
+        # ── 3. Confirmar y guardar ────────────────────────────────────────────
         if not is_logged_in(page):
             print("[ERROR] Login fallido. Revisa las credenciales en .env")
             browser.close()
