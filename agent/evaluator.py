@@ -68,6 +68,15 @@ Responde SOLO con el JSON, sin texto adicional.
 
 # ── Evaluación de un perfil ────────────────────────────────────────────────────
 
+def decision_from_score(score: int) -> str:
+    """Escala única (Criterios v1.2): ≥7 accept · 4–6 consult · ≤3 ignore."""
+    if score >= 7:
+        return "accept"
+    if score >= 4:
+        return "consult"
+    return "ignore"
+
+
 def build_user_message(perfil: dict) -> str:
     """Construye el mensaje para Claude con los datos del perfil."""
     nombre   = perfil.get("nombre", "Desconocido")
@@ -115,12 +124,20 @@ def evaluate_profile(client: openai.OpenAI, perfil: dict) -> dict:
 
         resultado = json.loads(raw)
 
-        # Validar campos mínimos
-        decision = resultado.get("decision", "consult").lower()
-        if decision not in {"accept", "consult", "ignore"}:
-            decision = "consult"
-        score  = int(resultado.get("score", 5))
+        # Una sola escala: el score 1–10 manda; la decisión se deriva en código.
+        try:
+            score = max(1, min(10, int(resultado.get("score", 5))))
+        except (TypeError, ValueError):
+            score = 5
+        decision = decision_from_score(score)
         reason = resultado.get("reason", "Sin razón")
+
+        decision_modelo = str(resultado.get("decision", "")).lower()
+        if decision_modelo and decision_modelo != decision:
+            log.warning(
+                f"Incoherencia en {perfil.get('nombre')}: modelo dijo '{decision_modelo}' "
+                f"con score {score} → se aplica '{decision}' según la escala."
+            )
 
         return {
             "nombre":     perfil.get("nombre"),
