@@ -29,3 +29,9 @@ build/
 # IDEs
 .vscode/
 .idea/
+
+# Datos de perfiles reales (no subir)
+data/decisions_preview.json
+data/pending_consult.json
+data/pending_requests.json
+data/dryrun_decisions.json

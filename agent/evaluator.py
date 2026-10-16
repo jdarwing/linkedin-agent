@@ -11,12 +11,12 @@ Uso:
 
 import json
 import logging
+import re
 import os
 import sys
 import time
 from pathlib import Path
 
-import openai
 from dotenv import load_dotenv
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -27,8 +27,17 @@ DATA_FILE     = Path(os.getenv("DATA_FILE",     "data/pending_requests.json"))
 DECISIONS_FILE = Path(os.getenv("DECISIONS_FILE", "data/decisions_preview.json"))
 LOG_FILE      = Path(os.getenv("LOG_FILE",      "logs/agent.log"))
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-MODEL          = "gpt-4o"   # modelo de producción; cambiar a gpt-4o-mini para desarrollo
+DRYRUN_DECISIONS_FILE = Path(os.getenv("DRYRUN_DECISIONS_FILE", "data/dryrun_decisions.json"))
+
+def _real_key(v: str) -> str:
+    v = (v or "").strip()
+    return "" if (not v or v.endswith("...") or "aqui" in v) else v
+
+ANTHROPIC_API_KEY = _real_key(os.getenv("ANTHROPIC_API_KEY", ""))
+OPENAI_API_KEY    = _real_key(os.getenv("OPENAI_API_KEY", ""))
+# Proveedor: Claude por defecto si hay clave de Anthropic; OpenAI como respaldo.
+PROVIDER = (os.getenv("EVAL_PROVIDER") or ("anthropic" if ANTHROPIC_API_KEY else "openai")).lower()
+MODEL    = os.getenv("EVAL_MODEL") or ("claude-sonnet-5-5" if PROVIDER == "anthropic" else "gpt-4o")
 MAX_TOKENS        = 300
 PAUSE_BETWEEN     = 1.0   # segundos entre llamadas (rate limit)
 
@@ -91,29 +100,44 @@ def build_user_message(perfil: dict) -> str:
     return "\n".join(partes)
 
 
-def evaluate_profile(client: openai.OpenAI, perfil: dict) -> dict:
-    """Llama a OpenAI API y devuelve la decisión parseada."""
-    user_msg = build_user_message(perfil)
+def make_client():
+    if PROVIDER == "anthropic":
+        import anthropic
+        return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    import openai
+    return openai.OpenAI(api_key=OPENAI_API_KEY)
 
-    try:
-        response = client.chat.completions.create(
+
+def _call_model(client, user_msg: str) -> str:
+    if PROVIDER == "anthropic":
+        resp = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
-            ],
-            response_format={"type": "json_object"},
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
         )
-        raw = response.choices[0].message.content.strip()
+        return "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    resp = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content.strip()
 
-        # Limpiar posibles ```json``` wrappers
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
 
-        resultado = json.loads(raw)
+def evaluate_profile(client, perfil: dict) -> dict:
+    """Llama al modelo y devuelve la decisión parseada."""
+    user_msg = build_user_message(perfil)
+    raw = ""
+
+    try:
+        raw = _call_model(client, user_msg)
+        m = re.search(r"\{.*\}", raw, re.S)   # tolera ```json``` u otro texto alrededor
+        resultado = json.loads(m.group(0) if m else raw)
 
         # Validar campos mínimos
         decision = resultado.get("decision", "consult").lower()
@@ -158,19 +182,20 @@ def _fallback(perfil: dict, decision: str, score: int, reason: str) -> dict:
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
-def evaluate_all(dry_run: bool = False) -> list:
-    if not OPENAI_API_KEY:
-        log.error("OPENAI_API_KEY no está configurado en .env")
+def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
+    key = ANTHROPIC_API_KEY if PROVIDER == "anthropic" else OPENAI_API_KEY
+    if not key:
+        log.error("Falta una clave real en .env: ANTHROPIC_API_KEY (Claude) u OPENAI_API_KEY.")
         sys.exit(1)
 
-    if not DATA_FILE.exists():
-        log.error(f"No se encontró {DATA_FILE}. Ejecuta 'python agent/scraper.py' primero.")
-        sys.exit(1)
+    if perfiles is None:
+        if not DATA_FILE.exists():
+            log.error(f"No se encontró {DATA_FILE}. Ejecuta 'python agent/scraper.py' primero.")
+            sys.exit(1)
+        perfiles = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    log.info(f"Evaluando {len(perfiles)} perfiles con {PROVIDER} ({MODEL})...")
 
-    perfiles = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    log.info(f"Evaluando {len(perfiles)} perfiles con OpenAI API ({MODEL})...")
-
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    client = make_client()
     resultados = []
 
     for i, perfil in enumerate(perfiles, 1):
@@ -200,8 +225,11 @@ def evaluate_all(dry_run: bool = False) -> list:
     log.info(f"  🔴 Ignorar:   {len(ignora)}")
 
     if dry_run:
-        print("\n── RESULTADO DRY-RUN ──────────────────────────────────")
-        print(json.dumps(resultados, indent=2, ensure_ascii=False))
+        # Archivo aparte: nunca lo lee actions.py en modo real
+        DRYRUN_DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DRYRUN_DECISIONS_FILE.write_text(
+            json.dumps(resultados, indent=2, ensure_ascii=False), encoding="utf-8")
+        log.info(f"✓ DRY-RUN: decisiones guardadas para revisión en {DRYRUN_DECISIONS_FILE}")
     else:
         DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         DECISIONS_FILE.write_text(

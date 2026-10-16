@@ -350,13 +350,13 @@ def check_replies() -> list:
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
-def notify_consult_profiles(dry_run: bool = False) -> None:
-    """Lee decisions_preview.json y envía email con los perfiles 'consult'."""
-    if not DECISIONS_FILE.exists():
-        log.error(f"No se encontró {DECISIONS_FILE}. Ejecuta evaluator.py primero.")
-        sys.exit(1)
-
-    resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
+def notify_consult_profiles(dry_run: bool = False, resultados: list | None = None) -> None:
+    """Envía email con los perfiles 'consult' (de la lista recibida o de decisions_preview.json)."""
+    if resultados is None:
+        if not DECISIONS_FILE.exists():
+            log.error(f"No se encontró {DECISIONS_FILE}. Ejecuta evaluator.py primero.")
+            sys.exit(1)
+        resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
     consultar  = [r for r in resultados if r.get("decision") == "consult"]
 
     if not consultar:

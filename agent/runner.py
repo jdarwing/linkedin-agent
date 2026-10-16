@@ -114,7 +114,7 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     # ── PASO 2: Evaluador ──────────────────────────────────────────────────────
     banner("PASO 2 / 4 — Evaluación de perfiles (evaluator)")
     try:
-        resultados = evaluate_all(dry_run=dry_run)
+        resultados = evaluate_all(dry_run=dry_run, perfiles=perfiles_raw)
         if not step_ok("Evaluator", resultados):
             log.info("Sin decisiones. Pipeline finalizado.")
             return
@@ -125,7 +125,7 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
         log.info(f"✓ Evaluación: ✅ {len(acepta)} accept | 🟡 {len(consulta)} consult | 🔴 {len(ignora)} ignore")
 
     except SystemExit as e:
-        log.error(f"Evaluator abortó (código {e.code}). Revisa OPENAI_API_KEY en .env.")
+        log.error(f"Evaluator abortó (código {e.code}). Revisa ANTHROPIC_API_KEY / OPENAI_API_KEY en .env.")
         return
     except Exception as e:
         log.error(f"Error inesperado en evaluator: {e}")
@@ -134,7 +134,7 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     # ── PASO 3: Acciones en LinkedIn ───────────────────────────────────────────
     banner("PASO 3 / 4 — Ejecución de acciones en LinkedIn (actions)")
     try:
-        stats = run_actions(dry_run=dry_run)
+        stats = run_actions(dry_run=dry_run, resultados=resultados)
         log.info(
             f"✓ Acciones: ✅ {stats['accepted']} aceptados | "
             f"🔴 {stats['ignored']} ignorados | 🟡 {stats['consult']} pendientes email"
@@ -150,8 +150,11 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     if len(consulta) > 0:
         banner("PASO 4 / 4 — Envío de email (notifier)")
         try:
-            notify_consult_profiles(dry_run=dry_run)
-            log.info(f"✓ Email enviado con {len(consulta)} perfiles para revisar.")
+            notify_consult_profiles(dry_run=dry_run, resultados=resultados)
+            if dry_run:
+                log.info(f"✓ DRY-RUN: NO se envió email ({len(consulta)} perfiles habrían ido a consulta).")
+            else:
+                log.info(f"✓ Email enviado con {len(consulta)} perfiles para revisar.")
         except Exception as e:
             log.error(f"Error enviando email: {e}")
     else:

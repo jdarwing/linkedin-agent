@@ -177,12 +177,18 @@ def accept_profile(page, perfil: dict) -> bool:
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
-def run_actions(dry_run: bool = False) -> dict:
-    if not DECISIONS_FILE.exists():
-        log.error(f"No se encontró {DECISIONS_FILE}. Ejecuta evaluator.py primero.")
-        sys.exit(1)
+def run_actions(dry_run: bool = False, resultados: list | None = None) -> dict:
+    # ── Candado de seguridad: sin autorización explícita, todo es simulación ──
+    if not dry_run and os.getenv("LINKEDIN_AGENT_LIVE", "0").strip() != "1":
+        log.warning("🔒 LINKEDIN_AGENT_LIVE != 1 → modo real BLOQUEADO. Se ejecuta como DRY-RUN; "
+                    "no se aceptará ninguna solicitud en LinkedIn.")
+        dry_run = True
 
-    resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
+    if resultados is None:
+        if not DECISIONS_FILE.exists():
+            log.error(f"No se encontró {DECISIONS_FILE}. Ejecuta evaluator.py primero.")
+            sys.exit(1)
+        resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
 
     to_accept  = [r for r in resultados if r.get("decision") == "accept"]
     to_ignore  = [r for r in resultados if r.get("decision") == "ignore"]
