@@ -95,6 +95,8 @@ def build_user_message(perfil: dict) -> str:
         partes.append(f"Empresa actual: {perfil.get('empresa_actual') or empresa}")
     if perfil.get("experiencia_reciente"):
         partes.append(f"Experiencia más reciente (texto del perfil): {perfil['experiencia_reciente'][:400]}")
+    if perfil.get("estudios"):
+        partes.append(f"Estudios (no muestra empresa actual): {perfil['estudios']}")
     if perfil.get("acerca_de"):
         partes.append(f"Acerca de (resumen del perfil): {perfil['acerca_de'][:400]}")
     if perfil.get("ubicacion"):

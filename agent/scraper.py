@@ -334,9 +334,15 @@ JS_PERFIL = """
     res.ubicacion = tl[k] || '';
     const lineaEmpresa = tl[k - 1] || '';
     if (lineaEmpresa.includes(' · ')) res.empresa_cabecera = lineaEmpresa.split(' · ')[0].replace(/\\s+y\\s+\\d+$|\\s+and\\s+\\d+$/i, '').trim();
+    // Diseño alterno: la empresa aparece como botón justo después de "Información de contacto"
+    if (!res.empresa_cabecera) {
+      const sig = tl[iC + 1] || '';
+      if (sig && !/^(Más de|More than|\\d|[·•,]|contactos|connections|seguidores|followers)/i.test(sig)) res.empresa_cabecera = sig;
+    }
     // titular: primera línea larga después del nombre y del grado de conexión
     res.titular = tl.slice(1, k - 1).find(t => t.length > 3 && !/^[·•]\\s*\\d|^[·•]$/.test(t)) || '';
   }
+  res.cabecera = tl.slice(0, Math.max(iC, 0) + 6);
   res.tiene_foto = !!(top && top.querySelector('img[src*="profile-displayphoto"], img[srcset*="profile-displayphoto"]'));
 
   const acerca = secciones.find(s => /^(Acerca de|About)$/i.test(titulo(s)));
@@ -401,7 +407,12 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
             perfil.update(exp)
             # Respaldo: la cabecera del perfil muestra la empresa actual aunque no cargue Experiencia
             if not perfil.get("empresa_actual") and datos.get("empresa_cabecera"):
-                perfil["empresa_actual"] = datos["empresa_cabecera"]
+                emp = re.sub(r"\s+(y|and)\s+\d+(\s+(más|more))?$", "", datos["empresa_cabecera"]).strip()
+                # Si no hay empresa, LinkedIn muestra la universidad en ese lugar
+                if re.search(r"universidad|university|instituto|institute|escuela|school|college|colegio", emp, re.I):
+                    perfil["estudios"] = emp
+                else:
+                    perfil["empresa_actual"] = emp
             if not perfil.get("cargo_actual") and datos.get("titular"):
                 perfil["cargo_actual"] = ""                     # el titular ya va en 'cargo'; no se duplica
             perfil["experiencia_reciente"] = " | ".join(datos.get("experiencia_lineas", [])[:5])
@@ -410,6 +421,7 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
             perfil["tiene_foto"] = datos.get("tiene_foto", False)
             if dry_run and k == 1:
                 DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
+                log.info(f"  Diagnóstico cabecera (perfil 1): {datos.get('cabecera')}")
             log.info(f"  [{k}/{len(perfiles)}] {perfil['nombre']}: "
                      f"{perfil.get('cargo_actual') or '(cargo: ver titular)'} · {perfil.get('empresa_actual') or '¿empresa?'}"
                      f"{' · ' + perfil['ubicacion'] if perfil.get('ubicacion') else ''}")
