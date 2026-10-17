@@ -229,7 +229,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
   </div>"""
 
     html_body = f"""<!DOCTYPE html>
-<html><body style="margin:0;padding:0;background:#f4f4f5;">
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#f4f4f5;">
 <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;color:#18181b;">
   <div style="font-size:20px;font-weight:bold;margin-bottom:4px;">{html.escape(titulo)}</div>
   <div style="font-size:14px;color:#52525b;margin-bottom:14px;">
@@ -592,7 +592,7 @@ def send_confirmation(state: dict, cambios: list) -> None:
             pend, SMTP_USER, plazo, titulo=f"Recibido ✓ · te quedan {len(pend)} por decidir", intro_html=resumen)
     else:
         asunto = "[LinkedIn Agent] Recibido ✓ · no te queda nada pendiente"
-        html_body = (f'<!DOCTYPE html><html><body style="background:#f4f4f5;"><div style="font-family:-apple-system,'
+        html_body = (f'<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="background:#f4f4f5;"><div style="font-family:-apple-system,'
                      f'Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;">{resumen}</div></body></html>')
         texto = f"Recibido. Aprobados: {len(aprob)}. Ignorados: {len(ign)}. No queda nada pendiente."
     _send(asunto, html_body, texto)
