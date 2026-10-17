@@ -35,6 +35,9 @@ MAX_PER_RUN     = int(os.getenv("MAX_PER_RUN", "30"))
 DEBUG_HTML_FILE = Path(os.getenv("DEBUG_HTML_FILE", "data/debug_invitations.html"))
 DEBUG_PERFIL_FILE = Path(os.getenv("DEBUG_PERFIL_FILE", "data/debug_perfil.html"))
 ENRIQUECER      = os.getenv("ENRIQUECER_PERFILES", "1") != "0"   # visitar cada perfil nuevo para leer cargo y empresa actuales
+LEER_TRAYECTORIA = os.getenv("LEER_TRAYECTORIA", "1") != "0"     # visitar también la página de experiencia completa
+FOTOS_DIR       = Path(os.getenv("FOTOS_DIR", "data/fotos"))
+DEBUG_EXP_FILE  = Path(os.getenv("DEBUG_EXP_FILE", "data/debug_experiencia.html"))
 STATE_FILE      = Path(os.getenv("CONSULT_STATE_FILE", "data/consult_state.json"))
 DECISIONS_CSV   = Path(os.getenv("DECISIONS_CSV", "data/decisions.csv"))
 
@@ -343,7 +346,9 @@ JS_PERFIL = """
     res.titular = tl.slice(1, k - 1).find(t => t.length > 3 && !/^[·•]\\s*\\d|^[·•]$/.test(t)) || '';
   }
   res.cabecera = tl.slice(0, Math.max(iC, 0) + 6);
-  res.tiene_foto = !!(top && top.querySelector('img[src*="profile-displayphoto"], img[srcset*="profile-displayphoto"]'));
+  const fotoEl = top ? top.querySelector('img[src*="profile-displayphoto"]') : null;
+  res.tiene_foto = !!fotoEl;
+  res.foto_url = fotoEl ? fotoEl.src : '';
 
   const acerca = secciones.find(s => /^(Acerca de|About)$/i.test(titulo(s)));
   if (acerca) res.acerca_de = lines(acerca).filter(t => !/^(Acerca de|About|…|más|more|see more|ver más)$/i.test(t)).join(' ').slice(0, 600);
@@ -385,6 +390,61 @@ def interpretar_experiencia(lineas: list) -> dict:
     return {"cargo_actual": cargo[:120], "empresa_actual": empresa[:120], "experiencia_es_actual": actual}
 
 
+JS_TRAYECTORIA = """
+() => {
+  const main = document.querySelector('main') || document.body;
+  const out = [];
+  for (const l of (main.innerText || '').split('\\n')) {
+    const t = l.replace(/\\s+/g, ' ').trim();
+    if (t && out[out.length - 1] !== t) out.push(t);
+  }
+  return out.slice(0, 250);
+}
+"""
+
+
+def _slug(url: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "", (url or "").rstrip("/").split("/in/")[-1])[:80] or "perfil"
+
+
+def descargar_foto(page, perfil: dict, url_foto: str) -> None:
+    """Guarda la foto de perfil en data/fotos/<slug>.jpg (para incrustarla en el correo)."""
+    if not url_foto.startswith("https://media.licdn.com/"):
+        return
+    try:
+        r = page.request.get(url_foto, timeout=15_000)
+        if r.ok and len(r.body()) > 500:
+            FOTOS_DIR.mkdir(parents=True, exist_ok=True)
+            destino = FOTOS_DIR / f"{_slug(perfil.get('profile_url'))}.jpg"
+            destino.write_bytes(r.body())
+            perfil["foto"] = str(destino)
+    except Exception as e:
+        log.warning(f"  No se pudo descargar la foto de {perfil.get('nombre')}: {e}")
+
+
+def leer_trayectoria(page, perfil: dict, dry_run: bool, primero: bool) -> None:
+    """Abre /details/experience/ y guarda el texto de toda la experiencia (empresas y cargos)."""
+    url = (perfil.get("profile_url") or "").rstrip("/") + "/details/experience/"
+    try:
+        time.sleep(random.uniform(2.0, 4.0))
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        time.sleep(random.uniform(2.5, 4.0))
+        if any(x in page.url for x in ("login", "authwall", "checkpoint", "uas")):
+            log.warning("⚠ LinkedIn pidió verificación en la página de experiencia.")
+            return
+        for _ in range(3):
+            page.evaluate("window.scrollBy(0, 1200)")
+            time.sleep(random.uniform(0.8, 1.5))
+        lineas = page.evaluate(JS_TRAYECTORIA)
+        # quitar encabezados y navegación típicos
+        lineas = [l for l in lineas if not re.match(r"^(Experiencia|Experience|Volver|Back|Mostrar|Show|Ver |See )", l)]
+        perfil["trayectoria"] = " | ".join(lineas)[:3000]
+        if dry_run and primero:
+            DEBUG_EXP_FILE.write_text(page.content(), encoding="utf-8")
+    except Exception as e:
+        log.warning(f"  No se pudo leer la experiencia de {perfil.get('nombre')}: {e}")
+
+
 def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
     """Visita cada perfil (pausas humanas) y agrega cargo_actual, empresa_actual, ubicacion y tiene_foto."""
     for k, perfil in enumerate(perfiles, 1):
@@ -419,6 +479,10 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
             perfil["ubicacion"] = datos.get("ubicacion", "")
             perfil["acerca_de"] = datos.get("acerca_de", "")
             perfil["tiene_foto"] = datos.get("tiene_foto", False)
+            if datos.get("foto_url"):
+                descargar_foto(page, perfil, datos["foto_url"])
+            if LEER_TRAYECTORIA:
+                leer_trayectoria(page, perfil, dry_run, primero=(k == 1))
             if dry_run and k == 1:
                 DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
                 log.info(f"  Diagnóstico cabecera (perfil 1): {datos.get('cabecera')}")

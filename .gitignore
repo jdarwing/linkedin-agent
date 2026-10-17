@@ -42,3 +42,5 @@ data/email_preview.html
 data/etiquetas_*.json
 data/debug_perfil.html
 data/respaldo-*/
+data/fotos/
+data/debug_experiencia.html

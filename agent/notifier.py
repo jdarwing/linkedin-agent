@@ -35,6 +35,7 @@ import secrets
 import smtplib
 import sys
 from datetime import datetime, timedelta, timezone
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -158,6 +159,20 @@ def plantilla_respuesta(items: list) -> str:
     return "\n".join(lineas)
 
 
+_FOTOS_CID: dict = {}
+
+
+def _foto_html(it: dict) -> str:
+    ruta = it.get("foto")
+    if not ruta or not Path(ruta).exists():
+        return ('<div style="width:56px;height:56px;border-radius:28px;background:#e4e4e7;color:#71717a;'
+                'font-size:22px;line-height:56px;text-align:center;">' + html.escape((it.get("nombre") or "?")[:1]) + '</div>')
+    cid = f"foto-{it['token']}"
+    _FOTOS_CID[cid] = ruta
+    return (f'<img src="cid:{cid}" width="56" height="56" alt="" '
+            f'style="width:56px;height:56px;border-radius:28px;object-fit:cover;display:block;">')
+
+
 def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | None = None,
                 intro_html: str = "") -> tuple:
     """Devuelve (asunto, html, texto_plano). Un solo correo de respuesta para todo el lote."""
@@ -175,7 +190,8 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
     for it in items:
         url = _safe_url(it.get("profile_url"))
         nombre = html.escape(it.get("nombre") or "")
-        rol = html.escape(_linea_rol(it))
+        rol_txt = _linea_rol(it)
+        rol = html.escape(rol_txt if len(rol_txt) <= 120 else rol_txt[:117].rsplit(" ", 1)[0] + "…")
         titular = (it.get("cargo") or "").strip()
         titular_html = (f'<div style="font-size:12px;color:#a1a1aa;margin-top:2px;">Titular: {html.escape(titular[:140])}</div>'
                         if titular and titular != _linea_rol(it) else "")
@@ -187,13 +203,21 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
         comunes = int(it.get("conexiones_comun") or 0)
         ver = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">ver perfil</a>' if url else "")
         extra = f" · 📍 {ubic}" if ubic else ""
+        tags = it.get("trayectoria_tags") or []
+        tray_html = (f'<div style="font-size:13px;color:#15803d;margin-top:4px;">🍇 Trayectoria: {html.escape(", ".join(tags[:3]))}</div>'
+                     if tags else "")
         tarjetas += f"""
   <div style="border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 10px;background:#ffffff;">
+   <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+    <td valign="top" width="64" style="width:64px;padding-right:10px;">{_foto_html(it)}</td>
+    <td valign="top">
     <div style="font-size:16px;font-weight:bold;color:#18181b;"><span style="color:#0a66c2;">{it.get('numero', '')}.</span> {nombre}</div>
     <div style="font-size:14px;color:#3f3f46;margin:2px 0 2px;">{rol}</div>{titular_html}
     <div style="font-size:13px;color:#71717a;margin-top:4px;">🤝 {comunes} en común{extra}{ver}</div>
     <div style="font-size:13px;color:#52525b;margin-top:8px;"><b>Por qué te lo consulto:</b> {razon}</div>
+    {tray_html}
     <div style="font-size:11px;color:#a1a1aa;margin-top:6px;">Código {it["token"]}</div>
+    </td></tr></table>
   </div>"""
 
     botones = f"""
@@ -233,18 +257,32 @@ def _send(asunto: str, html_body: str, texto: str) -> bool:
     if not (SMTP_USER and SMTP_PASS and NOTIFY_EMAIL):
         log.error("Faltan SMTP_USER, SMTP_PASS o NOTIFY_EMAIL en .env — no se envió el correo.")
         return False
-    msg = MIMEMultipart("alternative")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(texto, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+    cids = [c for c in re.findall(r'src="cid:([^"]+)"', html_body) if c in _FOTOS_CID]
+    if cids:
+        msg = MIMEMultipart("related")
+        msg.attach(alt)
+        for cid in dict.fromkeys(cids):
+            try:
+                img = MIMEImage(Path(_FOTOS_CID[cid]).read_bytes())
+                img.add_header("Content-ID", f"<{cid}>")
+                img.add_header("Content-Disposition", "inline", filename=f"{cid}.jpg")
+                msg.attach(img)
+            except Exception as e:
+                log.warning(f"No se pudo adjuntar la foto {cid}: {e}")
+    else:
+        msg = alt
     msg["Subject"] = asunto
     msg["From"] = SMTP_USER
     msg["To"] = NOTIFY_EMAIL
     msg["Message-ID"] = email.utils.make_msgid(domain="linkedin-agent.local")
-    msg.attach(MIMEText(texto, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
-            s.ehlo(); s.starttls(); s.login(SMTP_USER, SMTP_PASS)
-            s.sendmail(SMTP_USER, [NOTIFY_EMAIL], msg.as_string())
-        log.info(f"✓ Correo enviado a {NOTIFY_EMAIL}: {asunto}")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+            smtp.ehlo(); smtp.starttls(); smtp.login(SMTP_USER, SMTP_PASS)
+            smtp.sendmail(SMTP_USER, [NOTIFY_EMAIL], msg.as_string())
+        log.info(f"✓ Correo enviado a {NOTIFY_EMAIL}: {asunto}" + (f" ({len(set(cids))} fotos)" if cids else ""))
         return True
     except Exception as e:
         log.error(f"Error enviando correo: {e}")
@@ -281,6 +319,9 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
             "nombre": r.get("nombre"), "cargo": r.get("cargo"),
             "cargo_actual": r.get("cargo_actual"), "empresa_actual": r.get("empresa_actual"),
             "ubicacion": r.get("ubicacion"),
+            "foto": r.get("foto"),
+            "trayectoria_tags": ((r.get("señales") or {}).get("grupo_historia") or (r.get("señales") or {}).get("grupo_actual") or [])
+                                + ((r.get("señales") or {}).get("sector") or (r.get("señales") or {}).get("sector_palabras") or []),
             "conexiones_comun": r.get("conexiones_comun"), "profile_url": r.get("profile_url"),
             "score": r.get("score"), "reason": r.get("reason"),
             "creado": _now().isoformat(), "plazo": deadline.isoformat(),
@@ -293,6 +334,8 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
 
     if dry_run:
         PREVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+        for cid, ruta in _FOTOS_CID.items():
+            html_body = html_body.replace(f"cid:{cid}", Path(ruta).resolve().as_uri())
         PREVIEW_FILE.write_text(html_body, encoding="utf-8")
         log.info(f"DRY-RUN: NO se envió correo. Vista previa con {len(items)} perfiles en {PREVIEW_FILE}")
         return  # en dry-run no se guarda estado

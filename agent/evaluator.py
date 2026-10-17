@@ -95,6 +95,8 @@ def build_user_message(perfil: dict) -> str:
         partes.append(f"Empresa actual: {perfil.get('empresa_actual') or empresa}")
     if perfil.get("experiencia_reciente"):
         partes.append(f"Experiencia más reciente (texto del perfil): {perfil['experiencia_reciente'][:400]}")
+    if perfil.get("trayectoria"):
+        partes.append(f"Trayectoria completa (texto de su experiencia en LinkedIn): {perfil['trayectoria'][:900]}")
     if perfil.get("estudios"):
         partes.append(f"Estudios (no muestra empresa actual): {perfil['estudios']}")
     if perfil.get("acerca_de"):
@@ -216,16 +218,82 @@ def _empresas_d5() -> list:
         return [], set()
 
 
-def aplicar_regla_d5(resultado: dict, perfil: dict) -> dict:
-    empresas, verificados = _empresas_d5()
-    texto = _sin_tildes(" ".join(str(perfil.get(k) or "") for k in ("cargo", "empresa_actual", "cargo_actual")))
-    for nombre, variantes in empresas:
-        if any(re.search(r"\b" + re.escape(_sin_tildes(v)) + r"\b", texto) for v in variantes):
-            if (perfil.get("profile_url") or "").rstrip("/") in verificados:
-                return resultado
-            resultado["decision"] = "consult"
-            resultado["reason"] = f"Dice ser de {nombre} (sin verificar): confírmalo tú. " + (resultado.get("reason") or "")
-            return resultado
+def _reglas() -> dict:
+    try:
+        return json.loads(Path("config/reglas.json").read_text(encoding="utf-8"))
+    except Exception as ex:
+        log.warning(f"No se pudo leer config/reglas.json: {ex}")
+        return {}
+
+
+def _coinciden(texto: str, terminos: list) -> list:
+    """Términos (empresas o palabras) que aparecen como palabra completa, sin importar tildes ni mayúsculas."""
+    t = _sin_tildes(texto)
+    vistos = []
+    for term in terminos:
+        if term and re.search(r"(?<![\w])" + re.escape(_sin_tildes(term)) + r"(?![\w])", t) and term not in vistos:
+            vistos.append(term)
+    return vistos
+
+
+def señales_trayectoria(perfil: dict, cfg: dict) -> dict:
+    """Detecta empresas del grupo Frutura/ADR y del sector en el perfil y en toda su experiencia."""
+    grupo = cfg.get("D5_empresas_propias_y_grupo", {}).get("empresas", [])
+    tray = cfg.get("trayectoria", {})
+    actual = " ".join(str(perfil.get(k) or "") for k in ("cargo", "empresa_actual", "cargo_actual"))
+    historia = " ".join(str(perfil.get(k) or "") for k in ("trayectoria", "experiencia_reciente", "acerca_de"))
+    def grupo_en(texto):
+        return [e["nombre"] for e in grupo if _coinciden(texto, [e["nombre"]] + e.get("variantes", []))]
+    sector_emp = tray.get("empresas_sector", [])
+    sector_pal = tray.get("palabras_sector", [])
+    return {
+        "grupo_actual":   grupo_en(actual),
+        "grupo_historia": grupo_en(historia),
+        "sector":         _coinciden(actual + " " + historia, sector_emp)[:4],
+        "sector_palabras": _coinciden(actual + " " + historia, sector_pal)[:4],
+    }
+
+
+def aplicar_reglas(resultado: dict, perfil: dict) -> dict:
+    """
+    Reglas deterministas de Darwing sobre la evaluación del modelo:
+      D5 + trayectoria (17-oct): grupo Frutura/ADR → aceptar con >=10 contactos en común; si no, consultar con marca.
+      Sector (empresas o vocabulario del sector) → +10 en común: aceptar; nunca ignorar (pasa a consultar).
+    """
+    cfg = _reglas()
+    verificados = {u.rstrip("/") for u in cfg.get("D5_empresas_propias_y_grupo", {}).get("colaboradores_verificados", [])}
+    minimo = int(cfg.get("trayectoria", {}).get("min_contactos_comun", 10))
+    try:
+        comunes = int(perfil.get("conexiones_comun") or 0)
+    except (TypeError, ValueError):
+        comunes = 0
+    sen = señales_trayectoria(perfil, cfg)
+    resultado["señales"] = sen
+    previo = resultado.get("reason") or ""
+
+    if (perfil.get("profile_url") or "").rstrip("/") in verificados:
+        resultado.update(decision="accept", reason="Colaborador verificado del grupo. " + previo)
+        return resultado
+
+    grupo = sen["grupo_actual"] or sen["grupo_historia"]
+    if grupo:
+        verbo = "Trabaja en" if sen["grupo_actual"] else "Trabajó en"
+        if comunes >= minimo:
+            resultado.update(decision="accept", score=max(int(resultado.get("score") or 0), 8),
+                             reason=f"{verbo} {grupo[0]} (grupo) y tienen {comunes} contactos en común. " + previo)
+        else:
+            resultado.update(decision="consult",
+                             reason=f"Dice que {verbo.lower()} {grupo[0]} (sin verificar, {comunes} en común): confírmalo tú. " + previo)
+        return resultado
+
+    sector = sen["sector"] or sen["sector_palabras"]
+    if sector:
+        etiqueta = ", ".join(sector[:3])
+        if resultado.get("decision") == "ignore":
+            resultado.update(decision="consult", reason=f"Tiene trayectoria en el sector ({etiqueta}); no se ignora. " + previo)
+        elif resultado.get("decision") == "consult" and comunes >= minimo:
+            resultado.update(decision="accept", score=max(int(resultado.get("score") or 0), 7),
+                             reason=f"Trayectoria en el sector ({etiqueta}) y {comunes} contactos en común. " + previo)
     return resultado
 
 
@@ -249,7 +317,10 @@ def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
         nombre = perfil.get("nombre", "?")
         log.info(f"[{i}/{len(perfiles)}] Evaluando: {nombre}")
 
-        resultado = aplicar_regla_d5(evaluate_profile(client, perfil), perfil)
+        resultado = aplicar_reglas(evaluate_profile(client, perfil), perfil)
+        for k in ("foto", "conexiones_comun"):
+            if perfil.get(k) is not None:
+                resultado[k] = perfil.get(k)
         resultados.append(resultado)
 
         emoji = {"accept": "✅", "consult": "🟡", "ignore": "🔴"}.get(resultado["decision"], "❓")
