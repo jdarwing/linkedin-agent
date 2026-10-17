@@ -129,75 +129,103 @@ def _safe_url(url: str) -> str:
     return url if url.startswith("https://www.linkedin.com/in/") else ""
 
 
-def _mailto(agent_addr: str, comando: str, tokens: list) -> str:
-    subject = f"{comando} {' '.join(tokens)}"
-    body = ("Envía este correo tal cual (no hace falta escribir nada).\n"
-            f"{comando} {' '.join(tokens)}")
-    return f"mailto:{agent_addr}?subject={quote(subject)}&body={quote(body)}"
+def _mailto(agent_addr: str, asunto: str, cuerpo: str) -> str:
+    cuerpo = cuerpo.replace("\n", "\r\n")
+    return f"mailto:{agent_addr}?subject={quote(asunto)}&body={quote(cuerpo)}"
 
 
 def _boton(href: str, texto: str, fondo: str, color: str = "#ffffff") -> str:
-    return (f'<a href="{html.escape(href)}" style="display:inline-block;padding:10px 18px;'
+    return (f'<a href="{html.escape(href)}" style="display:inline-block;padding:12px 18px;'
             f'margin:4px 8px 4px 0;background:{fondo};color:{color};text-decoration:none;'
             f'border-radius:6px;font-weight:bold;font-size:15px;">{texto}</a>')
 
 
-def build_email(items: list, agent_addr: str, deadline: datetime) -> tuple:
-    """Devuelve (asunto, html, texto_plano). items: [{token, nombre, cargo, conexiones_comun, profile_url, reason}]"""
+def _linea_rol(it: dict) -> str:
+    """Cargo y empresa actuales (del perfil) si existen; si no, el titular de la invitación."""
+    cargo, empresa = (it.get("cargo_actual") or "").strip(), (it.get("empresa_actual") or "").strip()
+    if cargo or empresa:
+        return " · ".join(x for x in (cargo, empresa) if x)
+    return (it.get("cargo") or "").strip()
+
+
+def plantilla_respuesta(items: list) -> str:
+    """Cuerpo prellenado del correo de respuesta: una línea por perfil, con '?' para que Darwing elija."""
+    lineas = ["Cambia el ? por A (aceptar) o I (ignorar) y envía este correo.",
+              "Puedes dejar ? en los que aún no decidas.", ""]
+    for it in items:
+        nombre = (it.get("nombre") or "")[:40]
+        lineas.append(f"? {it['token']} {it.get('numero', '')}. {nombre}")
+    return "\n".join(lineas)
+
+
+def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | None = None,
+                intro_html: str = "") -> tuple:
+    """Devuelve (asunto, html, texto_plano). Un solo correo de respuesta para todo el lote."""
     plazo = deadline.astimezone(timezone(timedelta(hours=-5))).strftime("%d/%m %H:%M")  # hora Lima
     n = len(items)
-    asunto = f"[LinkedIn Agent] {n} {'perfil' if n == 1 else 'perfiles'} para tu decisión"
+    titulo = titulo or f"{n} {'perfil' if n == 1 else 'perfiles'} para tu decisión"
+    asunto = f"[LinkedIn Agent] {titulo}"
+    tokens = [it["token"] for it in items]
+
+    href_lote  = _mailto(agent_addr, "DECISIONES LinkedIn Agent", plantilla_respuesta(items))
+    href_todos = _mailto(agent_addr, f"ACEPTAR {' '.join(tokens)}", f"ACEPTAR {' '.join(tokens)}")
+    href_nadie = _mailto(agent_addr, f"IGNORAR {' '.join(tokens)}", f"IGNORAR {' '.join(tokens)}")
 
     tarjetas = ""
     for it in items:
         url = _safe_url(it.get("profile_url"))
         nombre = html.escape(it.get("nombre") or "")
-        cargo = html.escape(it.get("cargo") or "")
+        rol = html.escape(_linea_rol(it))
+        titular = (it.get("cargo") or "").strip()
+        titular_html = (f'<div style="font-size:12px;color:#a1a1aa;margin-top:2px;">Titular: {html.escape(titular[:140])}</div>'
+                        if titular and titular != _linea_rol(it) else "")
+        ubic = html.escape(it.get("ubicacion") or "")
         razon_txt = (it.get("reason") or "").strip()
         if len(razon_txt) > 220:
             razon_txt = razon_txt[:217].rsplit(" ", 1)[0] + "…"
         razon = html.escape(razon_txt)
         comunes = int(it.get("conexiones_comun") or 0)
         ver = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">ver perfil</a>' if url else "")
+        extra = f" · 📍 {ubic}" if ubic else ""
         tarjetas += f"""
-  <div style="border:1px solid #e4e4e7;border-radius:8px;padding:16px;margin:0 0 14px;background:#ffffff;">
-    <div style="font-size:17px;font-weight:bold;color:#18181b;">{nombre}</div>
-    <div style="font-size:14px;color:#52525b;margin:2px 0 6px;">{cargo}</div>
-    <div style="font-size:13px;color:#71717a;">🤝 {comunes} contactos en común{ver}</div>
-    <div style="font-size:13px;color:#3f3f46;margin:10px 0 12px;"><b>Por qué te lo consulto:</b> {razon}</div>
-    {_boton(_mailto(agent_addr, "ACEPTAR", [it["token"]]), "✅ Aceptar", "#15803d")}
-    {_boton(_mailto(agent_addr, "IGNORAR", [it["token"]]), "❌ Ignorar", "#f4f4f5", "#3f3f46")}
+  <div style="border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 10px;background:#ffffff;">
+    <div style="font-size:16px;font-weight:bold;color:#18181b;"><span style="color:#0a66c2;">{it.get('numero', '')}.</span> {nombre}</div>
+    <div style="font-size:14px;color:#3f3f46;margin:2px 0 2px;">{rol}</div>{titular_html}
+    <div style="font-size:13px;color:#71717a;margin-top:4px;">🤝 {comunes} en común{extra}{ver}</div>
+    <div style="font-size:13px;color:#52525b;margin-top:8px;"><b>Por qué te lo consulto:</b> {razon}</div>
     <div style="font-size:11px;color:#a1a1aa;margin-top:6px;">Código {it["token"]}</div>
   </div>"""
 
-    todos = [it["token"] for it in items]
-    bloque_todos = ""
-    if n > 1:
-        bloque_todos = f"""
-  <div style="text-align:center;margin:6px 0 4px;">
-    {_boton(_mailto(agent_addr, "ACEPTAR", todos), f"✅ Aceptar a los {n}", "#15803d")}
+    botones = f"""
+  <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 16px;">
+    {_boton(href_lote, "📝 Decidir todo en un solo correo", "#0a66c2")}
+    <div style="font-size:13px;color:#52525b;margin:6px 0 10px;">Se abre un correo con la lista: cambia cada <b>?</b> por <b>A</b> (aceptar) o <b>I</b> (ignorar) y envíalo una sola vez.</div>
+    {_boton(href_todos, f"✅ Aceptar a {'los ' + str(n) if n > 1 else 'este'}", "#15803d")}
+    {_boton(href_nadie, f"❌ Ignorar a {'los ' + str(n) if n > 1 else 'este'}", "#f4f4f5", "#3f3f46")}
   </div>"""
 
     html_body = f"""<!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:#f4f4f5;">
 <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;color:#18181b;">
-  <div style="font-size:20px;font-weight:bold;margin-bottom:4px;">{n} {'perfil' if n == 1 else 'perfiles'} para tu decisión</div>
-  <div style="font-size:14px;color:#52525b;margin-bottom:16px;">
-    Toca un botón y luego <b>Enviar</b>. Si no respondes antes del <b>{plazo}</b> (hora Lima), se ignoran.
+  <div style="font-size:20px;font-weight:bold;margin-bottom:4px;">{html.escape(titulo)}</div>
+  <div style="font-size:14px;color:#52525b;margin-bottom:14px;">
+    Plazo: <b>{plazo}</b> (hora Lima). Lo que no respondas para entonces se ignora.
   </div>
+  {intro_html}
+  {botones}
   {tarjetas}
-  {bloque_todos}
-  <div style="font-size:12px;color:#71717a;margin-top:18px;line-height:1.5;">
-    Ignorar no le avisa a la persona. Responder desde otra cuenta de correo no tiene efecto.<br>
-    Si los botones no abren tu correo: responde a este mensaje escribiendo <b>ACEPTAR</b> o <b>IGNORAR</b> seguido del código.
+  <div style="font-size:12px;color:#71717a;margin-top:16px;line-height:1.5;">
+    Te confirmaré por correo lo que reciba y lo que quede pendiente. Ignorar no le avisa a la persona.
+    Solo cuentan las respuestas desde tu correo.<br>
+    Si el botón no abre tu correo: responde escribiendo una línea por persona, por ejemplo <b>A {html.escape(tokens[0])}</b>.
   </div>
 </div></body></html>"""
 
-    texto = [f"{n} perfiles para tu decisión. Plazo: {plazo} (hora Lima). Sin respuesta = se ignoran.", ""]
+    texto = [titulo, f"Plazo: {plazo} (hora Lima). Sin respuesta = se ignoran.", "",
+             "Responde con una línea por persona: A <código> para aceptar, I <código> para ignorar.", ""]
     for it in items:
-        texto += [f"- {it.get('nombre')} | {it.get('cargo')} | {it.get('conexiones_comun', 0)} en común",
-                  f"  Por qué: {it.get('reason')}",
-                  f"  Responde: ACEPTAR {it['token']}   o   IGNORAR {it['token']}", ""]
+        texto += [f"{it.get('numero', '')}. {it.get('nombre')} | {_linea_rol(it)} | {it.get('conexiones_comun', 0)} en común",
+                  f"   Por qué: {it.get('reason')}", f"   Código: {it['token']}", ""]
     return asunto, html_body, "\n".join(texto)
 
 
@@ -249,7 +277,10 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
         tok = new_token(state["items"])
         item = {
             "token": tok,
+            "numero": len(items) + 1,
             "nombre": r.get("nombre"), "cargo": r.get("cargo"),
+            "cargo_actual": r.get("cargo_actual"), "empresa_actual": r.get("empresa_actual"),
+            "ubicacion": r.get("ubicacion"),
             "conexiones_comun": r.get("conexiones_comun"), "profile_url": r.get("profile_url"),
             "score": r.get("score"), "reason": r.get("reason"),
             "creado": _now().isoformat(), "plazo": deadline.isoformat(),
@@ -274,9 +305,9 @@ def send_test_email() -> None:
     """Correo de prueba con perfiles ficticios. Sus códigos no corresponden a nadie real."""
     deadline = _now() + timedelta(hours=HOURS_TO_REPLY)
     items = [
-        {"token": "PRUE-BA22", "nombre": "Persona de Prueba Uno", "cargo": "Gerente Comercial · Exportadora de fruta",
+        {"token": "PRUE-BA22", "numero": 1, "nombre": "Persona de Prueba Uno", "cargo": "Gerente Comercial · Exportadora de fruta",
          "conexiones_comun": 12, "profile_url": "", "reason": "Correo de prueba: toca un botón y envía para verificar el circuito."},
-        {"token": "PRUE-BA33", "nombre": "Persona de Prueba Dos", "cargo": "Consultora en calidad y certificaciones",
+        {"token": "PRUE-BA33", "numero": 2, "nombre": "Persona de Prueba Dos", "cargo": "Consultora en calidad y certificaciones",
          "conexiones_comun": 4, "profile_url": "", "reason": "Correo de prueba: no afecta a ninguna solicitud real."},
     ]
     asunto, html_body, texto = build_email(items, SMTP_USER or "agente@ejemplo.com", deadline)
@@ -333,15 +364,28 @@ def _texto_propio(msg) -> str:
     return _decode(msg.get("Subject", "")) + "\n" + "\n".join(propias)
 
 
+LINE_CMD_RE = re.compile(r"^\s*[-*•]?\s*(ACEPTAR|ACCEPT|IGNORAR|IGNORE|SI|SÍ|NO|A|I)\b[\s:.\-]*", re.I)
+
+
 def parse_commands(texto: str) -> dict:
-    """{token: 'accept'|'ignore'}. Un código con órdenes contradictorias se descarta."""
+    """
+    {token: 'accept'|'ignore'}. Formatos aceptados (uno por línea):
+      A K7F2-9QXA  /  I K7F2-9QXA  /  ACEPTAR K7F2-9QXA 3K7Z-RTW7  /  IGNORAR ...
+    Líneas con '?' se ignoran (aún sin decidir). Un código con órdenes contradictorias se descarta.
+    """
     result, conflict = {}, set()
     for line in texto.splitlines():
-        cmd = CMD_RE.search(line)
-        if not cmd:
-            continue
-        decision = "accept" if cmd.group(1).upper() in ("ACEPTAR", "ACCEPT") else "ignore"
-        for a, b in TOKEN_RE.findall(line[cmd.end():].upper()):
+        m = LINE_CMD_RE.match(line)
+        if not m:
+            # también vale la orden en medio de la línea (p. ej. el asunto "Re: ACEPTAR X")
+            m2 = re.search(r"\b(ACEPTAR|ACCEPT|IGNORAR|IGNORE)\b", line, re.I)
+            if not m2:
+                continue
+            palabra, resto = m2.group(1), line[m2.end():]
+        else:
+            palabra, resto = m.group(1), line[m.end():]
+        decision = "accept" if palabra.upper() in ("ACEPTAR", "ACCEPT", "SI", "SÍ", "A") else "ignore"
+        for a, b in TOKEN_RE.findall(resto.upper()):
             tok = f"{a}-{b}"
             if tok in result and result[tok] != decision:
                 conflict.add(tok)
@@ -351,9 +395,10 @@ def parse_commands(texto: str) -> dict:
     return result
 
 
-def apply_commands(state: dict, comandos: dict, fuente: str) -> list:
-    """Aplica órdenes a códigos pendientes y vigentes. Devuelve los cambios hechos."""
+def apply_commands(state: dict, comandos: dict, fuente: str, enviado: datetime | None = None) -> list:
+    """Aplica órdenes a códigos pendientes. El plazo se mide con la hora en que Darwing ENVIÓ la respuesta."""
     cambios = []
+    enviado = enviado or _now()
     for tok, decision in comandos.items():
         item = state["items"].get(tok)
         if tok.startswith("PRUE-"):
@@ -365,7 +410,7 @@ def apply_commands(state: dict, comandos: dict, fuente: str) -> list:
         if item["estado"] != "pendiente":
             log.info(f"Código {tok} ya resuelto ({item['estado']}) — sin cambios (un solo uso).")
             continue
-        if _now() > datetime.fromisoformat(item["plazo"]):
+        if enviado > datetime.fromisoformat(item["plazo"]):
             log.info(f"Código {tok} llegó fuera de plazo — se mantiene la regla de vencimiento.")
             continue
         item["estado"] = "aprobado" if decision == "accept" else "ignorado"
@@ -392,6 +437,7 @@ def check_replies(dry_run: bool = False) -> list:
     Devuelve los perfiles APROBADOS y aún no ejecutados en LinkedIn (para actions.py).
     """
     state = load_state()
+    cambios_total = []
     fechas = [datetime.fromisoformat(i["creado"]) for i in state["items"].values() if i["estado"] == "pendiente"]
     prueba = state.get("prueba_enviada")
     if prueba and _now() - datetime.fromisoformat(prueba) < timedelta(hours=HOURS_TO_REPLY):
@@ -405,10 +451,11 @@ def check_replies(dry_run: bool = False) -> list:
         try:
             with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as mail:
                 mail.login(SMTP_USER, SMTP_PASS)
-                mail.select("INBOX", readonly=True)
+                mail.select("INBOX")   # lectura y escritura: para mover a la papelera las respuestas ya procesadas
                 _, data = mail.search(None, f'(SINCE {(desde - timedelta(days=1)).strftime("%d-%b-%Y")})')
                 ids = data[0].split()
                 revisados = con_ordenes = 0
+                a_papelera = []
                 for num in ids:
                     revisados += 1
                     _, msg_data = mail.fetch(num, "(RFC822)")
@@ -425,10 +472,28 @@ def check_replies(dry_run: bool = False) -> list:
                         log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}. Asunto: {_decode(msg.get('Subject',''))[:80]}")
                         state["mensajes_procesados"].append(mid)
                         continue
-                    cambios = apply_commands(state, comandos, f"correo ({motivo})")
+                    try:
+                        enviado = email.utils.parsedate_to_datetime(msg.get("Date"))
+                        if enviado.tzinfo is None:
+                            enviado = enviado.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        enviado = _now()
+                    cambios = apply_commands(state, comandos, f"correo ({motivo})", enviado)
                     for c in cambios:
                         log.info(f"  {c['nombre']} → {c['estado'].upper()} (código {c['token']})")
+                    cambios_total.extend(cambios)
                     state["mensajes_procesados"].append(mid)
+                    a_papelera.append(num)
+                # Mover a la papelera las respuestas válidas ya procesadas (recuperables 30 días en Gmail)
+                if a_papelera and not dry_run:
+                    for num in a_papelera:
+                        if "gmail" in IMAP_HOST:
+                            mail.store(num, "+X-GM-LABELS", "\\Trash")
+                        else:
+                            mail.store(num, "+FLAGS", "\\Deleted")
+                    if "gmail" not in IMAP_HOST:
+                        mail.expunge()
+                    log.info(f"🗑 {len(a_papelera)} respuestas procesadas movidas a la papelera de {SMTP_USER}.")
             log.info(f"Buzón {SMTP_USER}: {revisados} correos revisados, {con_ordenes} con órdenes de aprobación.")
         except Exception as e:
             log.error(f"Error leyendo el buzón: {e}")
@@ -454,9 +519,40 @@ def check_replies(dry_run: bool = False) -> list:
             if i["estado"] in ("ignorado", "vencido"):
                 i["registrado"] = True
         save_state(state)
+        if cambios_total:
+            send_confirmation(state, cambios_total)
 
     return [dict(i, decision="accept") for i in state["items"].values()
             if i["estado"] == "aprobado" and not i.get("ejecutado_en_linkedin")]
+
+
+def send_confirmation(state: dict, cambios: list) -> None:
+    """Confirma a Darwing lo recibido y le reenvía, con el mismo botón, lo que sigue pendiente."""
+    aprob = [c for c in cambios if c["estado"] == "aprobado"]
+    ign = [c for c in cambios if c["estado"] == "ignorado"]
+    pend = sorted([i for i in state["items"].values() if i["estado"] == "pendiente"],
+                  key=lambda i: (i.get("creado", ""), i.get("numero") or 0))
+    pend = [dict(i, numero=k) for k, i in enumerate(pend, 1)]   # renumerar para este correo
+    def lista(xs):
+        return "".join(f"<li>{html.escape(x.get('nombre') or '')}</li>" for x in xs) or "<li>—</li>"
+    resumen = f"""
+  <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 16px;font-size:14px;">
+    <div style="font-weight:bold;margin-bottom:6px;">Recibí tu respuesta ✓</div>
+    <div>✅ Aprobados ({len(aprob)}):</div><ul style="margin:4px 0 8px;">{lista(aprob)}</ul>
+    <div>❌ Ignorados ({len(ign)}):</div><ul style="margin:4px 0 8px;">{lista(ign)}</ul>
+    <div style="color:#52525b;">Los aprobados se aceptarán en LinkedIn en la próxima corrida del agente
+    (mientras el candado esté puesto, quedan en espera).</div>
+  </div>"""
+    if pend:
+        plazo = min(datetime.fromisoformat(i["plazo"]) for i in pend)
+        asunto, html_body, texto = build_email(
+            pend, SMTP_USER, plazo, titulo=f"Recibido ✓ · te quedan {len(pend)} por decidir", intro_html=resumen)
+    else:
+        asunto = "[LinkedIn Agent] Recibido ✓ · no te queda nada pendiente"
+        html_body = (f'<!DOCTYPE html><html><body style="background:#f4f4f5;"><div style="font-family:-apple-system,'
+                     f'Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;">{resumen}</div></body></html>')
+        texto = f"Recibido. Aprobados: {len(aprob)}. Ignorados: {len(ign)}. No queda nada pendiente."
+    _send(asunto, html_body, texto)
 
 
 def mark_executed(profile_urls: list) -> None:

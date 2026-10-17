@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime
@@ -32,6 +33,10 @@ LOG_FILE     = Path(os.getenv("LOG_FILE",     "logs/agent.log"))
 INVITATIONS_URL = "https://www.linkedin.com/mynetwork/invitation-manager/received/"
 MAX_PER_RUN     = int(os.getenv("MAX_PER_RUN", "30"))
 DEBUG_HTML_FILE = Path(os.getenv("DEBUG_HTML_FILE", "data/debug_invitations.html"))
+DEBUG_PERFIL_FILE = Path(os.getenv("DEBUG_PERFIL_FILE", "data/debug_perfil.html"))
+ENRIQUECER      = os.getenv("ENRIQUECER_PERFILES", "1") != "0"   # visitar cada perfil nuevo para leer cargo y empresa actuales
+STATE_FILE      = Path(os.getenv("CONSULT_STATE_FILE", "data/consult_state.json"))
+DECISIONS_CSV   = Path(os.getenv("DECISIONS_CSV", "data/decisions.csv"))
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -279,6 +284,113 @@ def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> int:
     return final
 
 
+# ── Perfiles ya conocidos (para leer solo solicitudes NUEVAS) ─────────────────
+
+def perfiles_conocidos() -> set:
+    """URLs ya consultadas o ya decididas en corridas anteriores."""
+    urls = set()
+    try:
+        if STATE_FILE.exists():
+            urls |= {v.get("profile_url") for v in json.loads(STATE_FILE.read_text(encoding="utf-8"))["items"].values()}
+    except Exception as e:
+        log.warning(f"No se pudo leer {STATE_FILE}: {e}")
+    try:
+        if DECISIONS_CSV.exists():
+            import csv
+            with DECISIONS_CSV.open(encoding="utf-8") as f:
+                urls |= {r.get("profile_url") for r in csv.DictReader(f)}
+    except Exception as e:
+        log.warning(f"No se pudo leer {DECISIONS_CSV}: {e}")
+    return {u.rstrip("/") for u in urls if u}
+
+
+# ── Enriquecimiento: cargo y empresa actuales desde el perfil ──────────────────
+
+JS_PERFIL = """
+() => {
+  const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+  const lines = el => {
+    const out = [];
+    if (!el) return out;
+    for (const l of (el.innerText || '').split('\\n')) {
+      const t = clean(l);
+      if (t && !out.includes(t)) out.push(t);
+    }
+    return out;
+  };
+  const res = {experiencia_lineas: [], ubicacion: '', tiene_foto: false};
+  const main = document.querySelector('main') || document.body;
+  let sec = null;
+  const ancla = document.getElementById('experience');
+  if (ancla) sec = ancla.closest('section');
+  if (!sec) sec = Array.from(main.querySelectorAll('section')).find(s => {
+    const h = s.querySelector('h2');
+    return h && /^(Experiencia|Experience)\\b/i.test(clean(h.innerText));
+  });
+  if (sec) {
+    const li = sec.querySelector('li');
+    res.experiencia_lineas = lines(li)
+      .filter(t => !/^(Experiencia|Experience|Mostrar|Show|Ver todo|See all)/i.test(t))
+      .slice(0, 8);
+  }
+  const top = main.querySelector('section');
+  const tl = lines(top);
+  const iContacto = tl.findIndex(t => /Información de contacto|Contact info/i.test(t));
+  if (iContacto > 0) res.ubicacion = tl[iContacto - 1].replace(/[·•]\\s*$/, '').trim();
+  res.tiene_foto = !!(top && top.querySelector('img[src*="profile-displayphoto"]'));
+  return res;
+}
+"""
+
+_DURACION = re.compile(r"^\d+\s*(años?|mes(es)?|yrs?|years?|mos?|months?)\b", re.I)
+_FECHAS   = re.compile(r"(actualidad|present|\b(19|20)\d{2}\b)", re.I)
+
+
+def interpretar_experiencia(lineas: list) -> dict:
+    """Saca cargo y empresa de la primera entrada de Experiencia (rol único o empresa con varios roles)."""
+    if not lineas:
+        return {}
+    actual = any(re.search(r"actualidad|present", l, re.I) for l in lineas[:5])
+    if len(lineas) >= 3 and _DURACION.search(lineas[1].split(" · ")[-1]) and not _FECHAS.search(lineas[1]):
+        empresa, cargo = lineas[0], lineas[2]                # empresa con varios cargos
+    else:
+        cargo = lineas[0]
+        empresa = lineas[1].split(" · ")[0] if len(lineas) > 1 and not _FECHAS.search(lineas[1]) else ""
+    return {"cargo_actual": cargo[:120], "empresa_actual": empresa[:120], "experiencia_es_actual": actual}
+
+
+def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
+    """Visita cada perfil (pausas humanas) y agrega cargo_actual, empresa_actual, ubicacion y tiene_foto."""
+    for k, perfil in enumerate(perfiles, 1):
+        url = perfil.get("profile_url")
+        if not url:
+            continue
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            time.sleep(random.uniform(2.5, 4.5))
+            if any(x in page.url for x in ("login", "authwall", "checkpoint", "uas")):
+                log.warning("⚠ LinkedIn pidió verificación al visitar perfiles: se detiene el enriquecimiento.")
+                return
+            for _ in range(2):                                  # la sección Experiencia carga al bajar
+                page.evaluate("window.scrollBy(0, 900)")
+                time.sleep(random.uniform(1.0, 2.0))
+            datos = page.evaluate(JS_PERFIL)
+            perfil.update(interpretar_experiencia(datos.get("experiencia_lineas", [])))
+            perfil["experiencia_reciente"] = " | ".join(datos.get("experiencia_lineas", [])[:5])
+            perfil["ubicacion"] = datos.get("ubicacion", "")
+            perfil["tiene_foto"] = datos.get("tiene_foto", False)
+            if dry_run and k == 1:
+                DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
+            log.info(f"  [{k}/{len(perfiles)}] {perfil['nombre']}: "
+                     f"{perfil.get('cargo_actual') or '¿cargo?'} · {perfil.get('empresa_actual') or '¿empresa?'}")
+        except Exception as e:
+            log.warning(f"  No se pudo leer el perfil de {perfil.get('nombre')}: {e}")
+        time.sleep(random.uniform(4.0, 9.0))                    # ritmo humano entre perfiles
+    sin_datos = sum(1 for p in perfiles if not p.get("cargo_actual"))
+    if perfiles and sin_datos > len(perfiles) / 2:
+        log.warning(f"⚠ {sin_datos} de {len(perfiles)} perfiles sin cargo actual: revisar selectores (data/debug_perfil.html).")
+
+
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
 def scrape_invitations(dry_run: bool = False) -> list:
@@ -343,7 +455,8 @@ def scrape_invitations(dry_run: bool = False) -> list:
         total_declarado = page.evaluate(JS_TOTAL)
         if total_declarado is not None:
             log.info(f"LinkedIn declara {total_declarado} invitaciones recibidas.")
-        scroll_and_wait(page, MAX_PER_RUN)
+        conocidos = perfiles_conocidos()
+        scroll_and_wait(page, min(MAX_PER_RUN + len(conocidos), 100))
 
         # ── Extraer datos con JavaScript ──────────────────────────────────────
         log.info("Extrayendo datos de los cards...")
@@ -368,7 +481,13 @@ def scrape_invitations(dry_run: bool = False) -> list:
                 log.warning(f"No se pudo guardar el HTML de diagnóstico: {e}")
 
         # Limitar al máximo por sesión
-        perfiles = perfiles[:MAX_PER_RUN]
+        total_vistos = len(perfiles)
+        perfiles = [p for p in perfiles if (p.get("profile_url") or "").rstrip("/") not in conocidos][:MAX_PER_RUN]
+        log.info(f"{total_vistos} invitaciones visibles → {len(perfiles)} nuevas (tope {MAX_PER_RUN}).")
+
+        if ENRIQUECER and perfiles:
+            log.info("Leyendo cargo y empresa actuales de cada perfil nuevo...")
+            enriquecer_perfiles(page, perfiles, dry_run=dry_run)
 
         browser.close()
 

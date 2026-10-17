@@ -89,8 +89,16 @@ def build_user_message(perfil: dict) -> str:
     partes = [f"Nombre: {nombre}"]
     if cargo:
         partes.append(f"Headline: {cargo}")
-    if empresa:
-        partes.append(f"Empresa: {empresa}")
+    if perfil.get("cargo_actual"):
+        partes.append(f"Cargo actual (sección Experiencia): {perfil['cargo_actual']}")
+    if perfil.get("empresa_actual") or empresa:
+        partes.append(f"Empresa actual: {perfil.get('empresa_actual') or empresa}")
+    if perfil.get("experiencia_reciente"):
+        partes.append(f"Experiencia más reciente (texto del perfil): {perfil['experiencia_reciente'][:400]}")
+    if perfil.get("ubicacion"):
+        partes.append(f"Ubicación: {perfil['ubicacion']}")
+    if "tiene_foto" in perfil:
+        partes.append(f"Tiene foto de perfil: {'sí' if perfil['tiene_foto'] else 'no'}")
     partes.append(f"Conexiones en común: {conexiones}")
     if mensaje:
         partes.append(f"Mensaje personalizado: {mensaje}")
@@ -149,6 +157,9 @@ def evaluate_profile(client, perfil: dict) -> dict:
         return {
             "nombre":     perfil.get("nombre"),
             "cargo":      perfil.get("cargo"),
+            "cargo_actual":   perfil.get("cargo_actual"),
+            "empresa_actual": perfil.get("empresa_actual"),
+            "ubicacion":      perfil.get("ubicacion"),
             "empresa":    perfil.get("empresa"),
             "conexiones_comun": perfil.get("conexiones_comun"),
             "profile_url": perfil.get("profile_url"),
@@ -170,6 +181,9 @@ def _fallback(perfil: dict, decision: str, score: int, reason: str) -> dict:
     return {
         "nombre":     perfil.get("nombre"),
         "cargo":      perfil.get("cargo"),
+        "cargo_actual":   perfil.get("cargo_actual"),
+        "empresa_actual": perfil.get("empresa_actual"),
+        "ubicacion":      perfil.get("ubicacion"),
         "empresa":    perfil.get("empresa"),
         "conexiones_comun": perfil.get("conexiones_comun"),
         "profile_url": perfil.get("profile_url"),

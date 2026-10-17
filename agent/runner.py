@@ -209,7 +209,11 @@ def run_check_replies() -> None:
 if __name__ == "__main__":
     args = sys.argv[1:]
 
-    if "--check-replies" in args:
+    if "--solo-correo" in args:
+        # Revisión horaria: procesa respuestas, confirma por correo y vence plazos.
+        # No abre LinkedIn: las aceptaciones se hacen en la corrida programada.
+        check_replies()
+    elif "--check-replies" in args:
         run_check_replies()
     else:
         dry_run      = "--dry-run"      in args

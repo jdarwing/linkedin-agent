@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.linkedin-agent.correo</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/darwingcasana/Proyectos/linkedin-agent/.venv/bin/python</string>
+    <string>/Users/darwingcasana/Proyectos/linkedin-agent/agent/runner.py</string>
+    <string>--solo-correo</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/darwingcasana/Proyectos/linkedin-agent</string>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/darwingcasana/Proyectos/linkedin-agent/logs/correo.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/darwingcasana/Proyectos/linkedin-agent/logs/correo.log</string>
+</dict>
+</plist>
