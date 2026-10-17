@@ -173,6 +173,17 @@ def _foto_html(it: dict) -> str:
             f'style="width:56px;height:56px;border-radius:28px;object-fit:cover;display:block;">')
 
 
+def _puntaje_html(score) -> str:
+    """Puntaje 1–10 de la evaluación, con color: 1–3 bajo, 4–6 medio, 7–10 alto."""
+    try:
+        v = max(1, min(10, int(score)))
+    except (TypeError, ValueError):
+        return ""
+    fondo, color = (("#fee2e2", "#b91c1c") if v <= 3 else ("#fef3c7", "#92400e") if v <= 6 else ("#dcfce7", "#15803d"))
+    return (f'<span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:10px;'
+            f'background:{fondo};color:{color};font-size:13px;font-weight:bold;vertical-align:middle;">{v}/10</span>')
+
+
 def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | None = None,
                 intro_html: str = "") -> tuple:
     """Devuelve (asunto, html, texto_plano). Un solo correo de respuesta para todo el lote."""
@@ -211,7 +222,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
     <td valign="top" width="64" style="width:64px;padding-right:10px;">{_foto_html(it)}</td>
     <td valign="top">
-    <div style="font-size:16px;font-weight:bold;color:#18181b;"><span style="color:#0a66c2;">{it.get('numero', '')}.</span> {nombre}</div>
+    <div style="font-size:16px;font-weight:bold;color:#18181b;"><span style="color:#0a66c2;">{it.get('numero', '')}.</span> {nombre} {_puntaje_html(it.get("score"))}</div>
     <div style="font-size:14px;color:#3f3f46;margin:2px 0 2px;">{rol}</div>{titular_html}
     <div style="font-size:13px;color:#71717a;margin-top:4px;">🤝 {comunes} en común{extra}{ver}</div>
     <div style="font-size:13px;color:#52525b;margin-top:8px;"><b>Por qué te lo consulto:</b> {razon}</div>
@@ -248,7 +259,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
     texto = [titulo, f"Plazo: {plazo} (hora Lima). Sin respuesta = se ignoran.", "",
              "Responde con una línea por persona: A <código> para aceptar, I <código> para ignorar.", ""]
     for it in items:
-        texto += [f"{it.get('numero', '')}. {it.get('nombre')} | {_linea_rol(it)} | {it.get('conexiones_comun', 0)} en común",
+        texto += [f"{it.get('numero', '')}. {it.get('nombre')} ({it.get('score', '?')}/10) | {_linea_rol(it)} | {it.get('conexiones_comun', 0)} en común",
                   f"   Por qué: {it.get('reason')}", f"   Código: {it['token']}", ""]
     return asunto, html_body, "\n".join(texto)
 
