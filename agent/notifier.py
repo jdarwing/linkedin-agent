@@ -234,9 +234,11 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
         resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
 
     state = load_state()
-    ya_pendientes = {v.get("profile_url") for v in state["items"].values() if v["estado"] == "pendiente"}
+    # No volver a consultar a alguien ya consultado (pendiente, aprobado, ignorado o vencido):
+    # los ignorados siguen pendientes en LinkedIn y reaparecen en cada corrida.
+    ya_consultados = {v.get("profile_url") for v in state["items"].values()}
     consultar = [r for r in resultados
-                 if r.get("decision") == "consult" and r.get("profile_url") not in ya_pendientes]
+                 if r.get("decision") == "consult" and r.get("profile_url") not in ya_consultados]
     if not consultar:
         log.info("No hay perfiles nuevos para consultar.")
         return

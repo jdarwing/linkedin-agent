@@ -12,6 +12,7 @@ cd "$PROJECT_DIR" || exit 1
 # ── Pausa aleatoria: 0–60 minutos ─────────────────────────────────────────────
 # Esto distribuye la ejecución aleatoriamente dentro de la ventana 12:30–13:30
 SLEEP_SEC=$(( RANDOM % 3600 ))
+[ "${SKIP_RANDOM_SLEEP:-0}" = "1" ] && SLEEP_SEC=0   # para pruebas manuales
 SLEEP_MIN=$(( SLEEP_SEC / 60 ))
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inicio — pausa aleatoria de ${SLEEP_MIN}m ${SLEEP_SEC}s antes de ejecutar..."
 sleep "$SLEEP_SEC"
