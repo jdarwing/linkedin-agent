@@ -3,7 +3,7 @@
 # Ejecutar desde crontab: garantiza que corra entre 12:30 y 13:30 hora Lima
 #
 # Crontab entry (17:30 UTC = 12:30 Lima, lunes/miércoles/viernes):
-#   30 17 * * 1,3,5 /Users/darwingcasana/linkedin-agent/run_scheduled.sh >> /Users/darwingcasana/linkedin-agent/logs/cron.log 2>&1
+#   30 17 * * 1,3,5 /Users/darwingcasana/Proyectos/linkedin-agent/run_scheduled.sh >> /Users/darwingcasana/Proyectos/linkedin-agent/logs/cron.log 2>&1
 
 # ── Directorio del proyecto ────────────────────────────────────────────────────
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"

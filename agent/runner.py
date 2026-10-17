@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from scraper   import scrape_invitations
 from evaluator import evaluate_all
 from actions   import run_actions
-from notifier  import notify_consult_profiles, check_replies
+from notifier  import notify_consult_profiles, check_replies, mark_executed
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -92,6 +92,15 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     log.info(f"  Modo: {'DRY-RUN' if dry_run else 'PRODUCCIÓN'}")
     log.info(f"{'='*60}\n")
 
+    # ── PASO 0: Respuestas a correos de consulta anteriores ───────────────────
+    try:
+        aprobados_correo = check_replies(dry_run=dry_run)
+        if aprobados_correo:
+            log.info(f"✓ {len(aprobados_correo)} perfiles aprobados por Darwing (correo) pendientes de aceptar.")
+    except Exception as e:
+        log.error(f"Error leyendo respuestas de correo: {e}")
+        aprobados_correo = []
+
     # ── PASO 1: Scraper ────────────────────────────────────────────────────────
     if skip_scraper:
         log.info("⏭ Paso 1/4 OMITIDO: --skip-scraper activo (usando pending_requests.json existente)")
@@ -134,7 +143,8 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     # ── PASO 3: Acciones en LinkedIn ───────────────────────────────────────────
     banner("PASO 3 / 4 — Ejecución de acciones en LinkedIn (actions)")
     try:
-        stats = run_actions(dry_run=dry_run, resultados=resultados)
+        stats = run_actions(dry_run=dry_run, resultados=resultados + aprobados_correo)
+        mark_executed(stats.get("accepted_urls", []))
         log.info(
             f"✓ Acciones: ✅ {stats['accepted']} aceptados | "
             f"🔴 {stats['ignored']} ignorados | 🟡 {stats['consult']} pendientes email"
@@ -168,64 +178,30 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> None:
     log.info(f"  🔴 Ignorados (log):    {stats.get('ignored', 0)}")
     log.info(f"  🟡 Pendientes email:   {len(consulta)}")
     if len(consulta) > 0 and not dry_run:
-        log.info(f"  📧 Revisa jdarwing@hotmail.com — tienes 48h para responder.")
+        log.info(f"  📧 Revisa tu correo: un toque por perfil, tienes 48 h para responder.")
     log.info(f"{'='*60}\n")
 
 
 def run_check_replies() -> None:
-    """Lee respuestas del email y acepta en LinkedIn los perfiles aprobados."""
+    """Lee respuestas del correo y acepta en LinkedIn los perfiles aprobados (respeta el candado)."""
     inicio = datetime.now(timezone.utc)
-    log.info(f"\n{'='*60}")
-    log.info(f"  LinkedIn Agent — CHECK REPLIES {inicio.strftime('%d/%m/%Y %H:%M UTC')}")
-    log.info(f"{'='*60}\n")
-
-    # ── Leer respuestas IMAP ───────────────────────────────────────────────────
-    banner("PASO 1 / 2 — Lectura de respuestas por email (notifier --check)")
+    banner(f"LinkedIn Agent — CHECK REPLIES {inicio.strftime('%d/%m/%Y %H:%M UTC')}")
     try:
-        procesados = check_replies()
-        if not procesados:
-            log.info("Sin respuestas nuevas o fuera del plazo. Nada que hacer.")
-            return
-
-        aprobados = [p for p in procesados if p["decision"] == "accept"]
-        rechazados = [p for p in procesados if p["decision"] == "ignore"]
-        log.info(f"✓ Respuestas procesadas: {len(aprobados)} ACEPTAR | {len(rechazados)} IGNORAR")
-
+        aprobados = check_replies()
     except Exception as e:
         log.error(f"Error leyendo respuestas: {e}")
         return
-
     if not aprobados:
-        log.info("Ningún perfil aprobado por email. Pipeline finalizado.")
+        log.info("Ningún perfil aprobado pendiente de aceptar. Nada que hacer.")
         return
-
-    # Construir decisions_preview.json solo con los aprobados por email
-    # para que actions.py los procese
-    import json
-    aprobados_data = [
-        {**p["perfil"], "decision": "accept", "score": p["perfil"].get("score", 7), "reason": "Aprobado manualmente por email"}
-        for p in aprobados
-    ]
-    DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DECISIONS_FILE.write_text(
-        json.dumps(aprobados_data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    log.info(f"✓ {len(aprobados_data)} perfiles listos para aceptar en LinkedIn.")
-
-    # ── Aceptar en LinkedIn ────────────────────────────────────────────────────
-    banner("PASO 2 / 2 — Aceptación en LinkedIn (actions)")
+    log.info(f"✓ {len(aprobados)} perfiles aprobados por correo → aceptación en LinkedIn")
+    stats = {}
     try:
-        stats = run_actions(dry_run=False)
-        log.info(f"✓ {stats['accepted']} perfiles aceptados en LinkedIn.")
+        stats = run_actions(dry_run=False, resultados=aprobados)   # el candado LIVE puede convertirlo en simulación
+        mark_executed(stats.get("accepted_urls", []))
     except Exception as e:
         log.error(f"Error en actions: {e}")
-
-    duracion = (datetime.now(timezone.utc) - inicio).seconds
-    log.info(f"\n{'='*60}")
-    log.info(f"  Check-replies completado en {duracion}s")
-    log.info(f"  ✅ Aceptados: {stats.get('accepted', 0)} | 🔴 Rechazados (email): {len(rechazados)}")
-    log.info(f"{'='*60}\n")
+    log.info(f"  ✅ Aceptados en LinkedIn: {stats.get('accepted', 0)} de {len(aprobados)} aprobados")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

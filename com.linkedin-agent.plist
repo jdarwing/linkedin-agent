@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/darwingcasana/linkedin-agent/run_scheduled.sh</string>
+    <string>/Users/darwingcasana/Proyectos/linkedin-agent/run_scheduled.sh</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
@@ -29,9 +29,9 @@
     </dict>
   </array>
   <key>StandardOutPath</key>
-  <string>/Users/darwingcasana/linkedin-agent/logs/cron.log</string>
+  <string>/Users/darwingcasana/Proyectos/linkedin-agent/logs/cron.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/darwingcasana/linkedin-agent/logs/cron.log</string>
+  <string>/Users/darwingcasana/Proyectos/linkedin-agent/logs/cron.log</string>
   <key>RunAtLoad</key>
   <false/>
 </dict>

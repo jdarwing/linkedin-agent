@@ -370,6 +370,7 @@ def run_actions(dry_run: bool = False, resultados: list | None = None) -> dict:
     log.info(f"  📄 Total en CSV: {len(all_rows)}")
 
     return {
+        "accepted_urls": [r.get("profile_url") for r in accepted_rows],
         "accepted": accepted_count,
         "failed":   failed_count,
         "ignored":  len(to_ignore),

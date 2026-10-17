@@ -35,3 +35,7 @@ data/decisions_preview.json
 data/pending_consult.json
 data/pending_requests.json
 data/dryrun_decisions.json
+data/*.bak*
+data/debug_*.html
+data/consult_state.json
+data/email_preview.html

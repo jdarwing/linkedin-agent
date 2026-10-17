@@ -1,32 +1,44 @@
 """
-notifier.py — Notificaciones por email (Gmail) y lectura de respuestas
-=======================================================================
-Envía un email con los perfiles "consultar" numerados a jdarwing@hotmail.com.
-Darwing responde el mismo email con "1: ACEPTAR, 2: IGNORAR" etc.
-En la siguiente ejecución, el agente lee las respuestas vía IMAP (Gmail) y actualiza decisions.csv.
+notifier.py — Correo de consulta "un toque" y lectura segura de respuestas
+==========================================================================
+Envía a Darwing un correo con los perfiles "consult". Cada perfil trae dos botones
+(✅ Aceptar / ❌ Ignorar). Cada botón abre un correo ya escrito, dirigido al agente,
+con un CÓDIGO ÚNICO de ese perfil en el asunto: Darwing solo toca "Enviar".
 
-Nota: el email SE ENVÍA desde Gmail (SMTP_USER = tu cuenta Gmail).
-La respuesta de Darwing llega al inbox de Gmail → IMAP lee de Gmail.
+Seguridad (hallazgo H9 del Consejo):
+  - Solo se procesan correos cuyo remitente es NOTIFY_EMAIL y que pasan la
+    verificación de autenticidad del proveedor (DMARC/DKIM, cabecera Authentication-Results).
+  - Cada código es aleatorio, distinto por perfil y de un solo uso; no se reutilizan lotes.
+  - Los textos del perfil se escapan en el HTML (nadie puede inyectar botones o texto).
+  - Responder NO acepta en LinkedIn por sí solo: deja el perfil "aprobado"; la aceptación
+    real la hace actions.py, que respeta el candado LINKEDIN_AGENT_LIVE.
+
+Estado: data/consult_state.json  (un registro por código, nunca se sobrescriben lotes)
 
 Uso:
-    python agent/notifier.py --send    # envía email con perfiles pendientes
-    python agent/notifier.py --check   # lee respuestas y actualiza decisions.csv
+    python agent/notifier.py --preview   # genera data/email_preview.html con los 'consult' del último dry-run
+    python agent/notifier.py --test      # envía un correo de PRUEBA (perfiles ficticios) a NOTIFY_EMAIL
+    python agent/notifier.py --check     # lee respuestas y actualiza el estado
 """
 
 import csv
-import email as email_lib
+import email
 import email.header
+import email.utils
+import html
 import imaplib
 import json
 import logging
 import os
 import re
+import secrets
 import smtplib
 import sys
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -34,23 +46,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DECISIONS_FILE  = Path(os.getenv("DECISIONS_FILE",  "data/decisions_preview.json"))
-PENDING_FILE    = Path(os.getenv("PENDING_FILE",     "data/pending_consult.json"))
-DECISIONS_CSV   = Path(os.getenv("DECISIONS_CSV",   "data/decisions.csv"))
-LOG_FILE        = Path(os.getenv("LOG_FILE",         "logs/agent.log"))
+DECISIONS_FILE = Path(os.getenv("DRYRUN_DECISIONS_FILE", "data/dryrun_decisions.json"))
+STATE_FILE     = Path(os.getenv("CONSULT_STATE_FILE", "data/consult_state.json"))
+PREVIEW_FILE   = Path(os.getenv("EMAIL_PREVIEW_FILE", "data/email_preview.html"))
+DECISIONS_CSV  = Path(os.getenv("DECISIONS_CSV", "data/decisions.csv"))
+LOG_FILE       = Path(os.getenv("LOG_FILE", "logs/agent.log"))
 
-NOTIFY_EMAIL    = os.getenv("NOTIFY_EMAIL",  "jdarwing@hotmail.com")
-SMTP_HOST       = os.getenv("SMTP_HOST",     "smtp.gmail.com")       # Gmail SMTP
-SMTP_PORT       = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER       = os.getenv("SMTP_USER",     "")   # tu cuenta Gmail completa
-SMTP_PASS       = os.getenv("SMTP_PASS",     "")   # App Password de Gmail (16 chars)
+NOTIFY_EMAIL   = os.getenv("NOTIFY_EMAIL", "").strip()          # correo de Darwing (quien decide)
+SMTP_HOST      = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT      = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER      = os.getenv("SMTP_USER", "").strip()             # Gmail del agente (envía y recibe)
+SMTP_PASS      = "".join(os.getenv("SMTP_PASS", "").split())   # quita espacios (incl. no separables) que Google muestra en la clave
+IMAP_HOST      = os.getenv("IMAP_HOST", "imap.gmail.com")
+IMAP_PORT      = int(os.getenv("IMAP_PORT", "993"))
 
-# IMAP: lee la bandeja de SMTP_USER (Gmail) donde llegan las respuestas de Darwing.
-# Hotmail desactivó auth básica; Gmail con App Password sí funciona.
-IMAP_HOST       = os.getenv("IMAP_HOST",     "imap.gmail.com")
-IMAP_PORT       = int(os.getenv("IMAP_PORT", "993"))
+HOURS_TO_REPLY = int(os.getenv("HOURS_TO_REPLY", "48"))         # D4: 48 h (decisión de Darwing, 16-oct)
+REQUIRE_AUTH   = os.getenv("REQUIRE_EMAIL_AUTH", "1") != "0"     # exigir DMARC/DKIM del remitente
 
-HOURS_TO_REPLY  = 48   # horas para responder antes de ignorar automáticamente
+TOKEN_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"               # sin 0/O/1/I/L para evitar confusiones
+TOKEN_LEN      = 8
+TOKEN_RE       = re.compile(r"\b([A-HJKMNP-Z2-9]{4})-([A-HJKMNP-Z2-9]{4})\b")
+CMD_RE         = re.compile(r"\b(ACEPTAR|ACCEPT|IGNORAR|IGNORE)\b", re.I)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -58,329 +74,411 @@ LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger("notifier")
 
 
-# ── CSV helpers ────────────────────────────────────────────────────────────────
+# ── Estado ─────────────────────────────────────────────────────────────────────
 
-CSV_FIELDS = [
-    "fecha", "nombre", "cargo", "conexiones_comun", "profile_url",
-    "decision", "score", "reason", "fuente",
-]
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    return {"items": {}, "mensajes_procesados": []}
+
+
+def save_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+
+def new_token(existing) -> str:
+    while True:
+        raw = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(TOKEN_LEN))
+        tok = f"{raw[:4]}-{raw[4:]}"
+        if tok not in existing:
+            return tok
+
+
+CSV_FIELDS = ["fecha", "nombre", "cargo", "conexiones_comun", "profile_url",
+              "decision", "score", "reason", "fuente"]
 
 
 def append_to_csv(rows: list) -> None:
-    """Agrega filas al CSV de decisiones históricas."""
+    if not rows:
+        return
     DECISIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
     write_header = not DECISIONS_CSV.exists()
     with DECISIONS_CSV.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         if write_header:
-            writer.writeheader()
-        writer.writerows(rows)
+            w.writeheader()
+        w.writerows(rows)
 
 
-# ── Construcción del email HTML ────────────────────────────────────────────────
+# ── Construcción del correo ────────────────────────────────────────────────────
 
-def build_email_html(perfiles: list, sent_at: str) -> str:
-    deadline = (
-        datetime.fromisoformat(sent_at) + timedelta(hours=HOURS_TO_REPLY)
-    ).strftime("%d/%m/%Y %H:%M")
+def _safe_url(url: str) -> str:
+    url = (url or "").strip()
+    return url if url.startswith("https://www.linkedin.com/in/") else ""
 
-    filas = ""
-    for i, p in enumerate(perfiles, 1):
-        conexiones = p.get("conexiones_comun", 0)
-        filas += f"""
-        <tr style="border-bottom:1px solid #eee;">
-          <td style="padding:12px 8px;font-weight:bold;color:#0a66c2;font-size:16px;">{i}</td>
-          <td style="padding:12px 8px;">
-            <strong><a href="{p.get('profile_url','#')}" style="color:#0a66c2;text-decoration:none;">{p.get('nombre','')}</a></strong><br>
-            <span style="color:#555;font-size:13px;">{p.get('cargo','')}</span><br>
-            <span style="color:#888;font-size:12px;">🤝 {conexiones} conexiones en común</span>
-          </td>
-          <td style="padding:12px 8px;color:#555;font-size:13px;">{p.get('reason','')}</td>
-        </tr>"""
 
-    instrucciones = "".join([
-        f"<li><b>{i}: ACEPTAR</b> o <b>{i}: IGNORAR</b></li>"
-        for i in range(1, len(perfiles) + 1)
-    ])
+def _mailto(agent_addr: str, comando: str, tokens: list) -> str:
+    subject = f"{comando} {' '.join(tokens)}"
+    body = ("Envía este correo tal cual (no hace falta escribir nada).\n"
+            f"{comando} {' '.join(tokens)}")
+    return f"mailto:{agent_addr}?subject={quote(subject)}&body={quote(body)}"
 
-    return f"""
-<!DOCTYPE html>
-<html>
-<body style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;color:#333;">
-  <div style="background:#0a66c2;padding:20px 24px;border-radius:8px 8px 0 0;">
-    <h2 style="color:#fff;margin:0;">LinkedIn Agent — {len(perfiles)} perfiles para revisar</h2>
-    <p style="color:#cce0ff;margin:4px 0 0;">Tienes hasta el <strong style="color:#fff;">{deadline}</strong> para responder</p>
+
+def _boton(href: str, texto: str, fondo: str, color: str = "#ffffff") -> str:
+    return (f'<a href="{html.escape(href)}" style="display:inline-block;padding:10px 18px;'
+            f'margin:4px 8px 4px 0;background:{fondo};color:{color};text-decoration:none;'
+            f'border-radius:6px;font-weight:bold;font-size:15px;">{texto}</a>')
+
+
+def build_email(items: list, agent_addr: str, deadline: datetime) -> tuple:
+    """Devuelve (asunto, html, texto_plano). items: [{token, nombre, cargo, conexiones_comun, profile_url, reason}]"""
+    plazo = deadline.astimezone(timezone(timedelta(hours=-5))).strftime("%d/%m %H:%M")  # hora Lima
+    n = len(items)
+    asunto = f"[LinkedIn Agent] {n} {'perfil' if n == 1 else 'perfiles'} para tu decisión"
+
+    tarjetas = ""
+    for it in items:
+        url = _safe_url(it.get("profile_url"))
+        nombre = html.escape(it.get("nombre") or "")
+        cargo = html.escape(it.get("cargo") or "")
+        razon_txt = (it.get("reason") or "").strip()
+        if len(razon_txt) > 220:
+            razon_txt = razon_txt[:217].rsplit(" ", 1)[0] + "…"
+        razon = html.escape(razon_txt)
+        comunes = int(it.get("conexiones_comun") or 0)
+        ver = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">ver perfil</a>' if url else "")
+        tarjetas += f"""
+  <div style="border:1px solid #e4e4e7;border-radius:8px;padding:16px;margin:0 0 14px;background:#ffffff;">
+    <div style="font-size:17px;font-weight:bold;color:#18181b;">{nombre}</div>
+    <div style="font-size:14px;color:#52525b;margin:2px 0 6px;">{cargo}</div>
+    <div style="font-size:13px;color:#71717a;">🤝 {comunes} contactos en común{ver}</div>
+    <div style="font-size:13px;color:#3f3f46;margin:10px 0 12px;"><b>Por qué te lo consulto:</b> {razon}</div>
+    {_boton(_mailto(agent_addr, "ACEPTAR", [it["token"]]), "✅ Aceptar", "#15803d")}
+    {_boton(_mailto(agent_addr, "IGNORAR", [it["token"]]), "❌ Ignorar", "#f4f4f5", "#3f3f46")}
+    <div style="font-size:11px;color:#a1a1aa;margin-top:6px;">Código {it["token"]}</div>
+  </div>"""
+
+    todos = [it["token"] for it in items]
+    bloque_todos = ""
+    if n > 1:
+        bloque_todos = f"""
+  <div style="text-align:center;margin:6px 0 4px;">
+    {_boton(_mailto(agent_addr, "ACEPTAR", todos), f"✅ Aceptar a los {n}", "#15803d")}
+  </div>"""
+
+    html_body = f"""<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#f4f4f5;">
+<div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:20px 14px;color:#18181b;">
+  <div style="font-size:20px;font-weight:bold;margin-bottom:4px;">{n} {'perfil' if n == 1 else 'perfiles'} para tu decisión</div>
+  <div style="font-size:14px;color:#52525b;margin-bottom:16px;">
+    Toca un botón y luego <b>Enviar</b>. Si no respondes antes del <b>{plazo}</b> (hora Lima), se ignoran.
   </div>
-
-  <div style="padding:24px;background:#f9f9f9;border:1px solid #ddd;border-top:none;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:6px;border:1px solid #eee;">
-      <thead>
-        <tr style="background:#f0f4f8;">
-          <th style="padding:10px 8px;text-align:left;width:30px;">#</th>
-          <th style="padding:10px 8px;text-align:left;">Perfil</th>
-          <th style="padding:10px 8px;text-align:left;">Por qué consultar</th>
-        </tr>
-      </thead>
-      <tbody>{filas}</tbody>
-    </table>
-
-    <div style="margin-top:24px;padding:16px;background:#fff3cd;border-radius:6px;border:1px solid #ffc107;">
-      <h3 style="margin:0 0 8px;color:#856404;">📧 Cómo responder</h3>
-      <p style="margin:0 0 8px;">Responde <strong>este mismo email</strong> con tus decisiones, una por línea:</p>
-      <ul style="margin:0;padding-left:20px;">
-        {instrucciones}
-      </ul>
-      <p style="margin:8px 0 0;color:#856404;font-size:13px;">
-        Ejemplo de respuesta: <code>1: ACEPTAR<br>2: IGNORAR<br>3: ACEPTAR</code>
-      </p>
-    </div>
-
-    <p style="margin-top:16px;color:#888;font-size:12px;">
-      Si no respondes antes del {deadline}, los perfiles sin decisión serán ignorados automáticamente.<br>
-      Ignorar en LinkedIn no notifica al solicitante.
-    </p>
+  {tarjetas}
+  {bloque_todos}
+  <div style="font-size:12px;color:#71717a;margin-top:18px;line-height:1.5;">
+    Ignorar no le avisa a la persona. Responder desde otra cuenta de correo no tiene efecto.<br>
+    Si los botones no abren tu correo: responde a este mensaje escribiendo <b>ACEPTAR</b> o <b>IGNORAR</b> seguido del código.
   </div>
-</body>
-</html>"""
+</div></body></html>"""
+
+    texto = [f"{n} perfiles para tu decisión. Plazo: {plazo} (hora Lima). Sin respuesta = se ignoran.", ""]
+    for it in items:
+        texto += [f"- {it.get('nombre')} | {it.get('cargo')} | {it.get('conexiones_comun', 0)} en común",
+                  f"  Por qué: {it.get('reason')}",
+                  f"  Responde: ACEPTAR {it['token']}   o   IGNORAR {it['token']}", ""]
+    return asunto, html_body, "\n".join(texto)
 
 
-# ── Envío de email ─────────────────────────────────────────────────────────────
-
-def send_consult_email(perfiles: list) -> str | None:
-    """Envía el email y devuelve el Message-ID para rastrear respuestas."""
-    if not SMTP_USER or not SMTP_PASS:
-        log.error("SMTP_USER o SMTP_PASS no configurados en .env")
-        return None
-
-    sent_at = datetime.now(timezone.utc).isoformat()
-    html    = build_email_html(perfiles, sent_at)
-
+def _send(asunto: str, html_body: str, texto: str) -> bool:
+    if not (SMTP_USER and SMTP_PASS and NOTIFY_EMAIL):
+        log.error("Faltan SMTP_USER, SMTP_PASS o NOTIFY_EMAIL en .env — no se envió el correo.")
+        return False
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[LinkedIn Agent] {len(perfiles)} perfiles para revisar — {datetime.now().strftime('%d/%m/%Y')}"
-    msg["From"]    = SMTP_USER
-    msg["To"]      = NOTIFY_EMAIL
-    msg["X-LinkedIn-Agent-Sent"] = sent_at
-    msg.attach(MIMEText(html, "html", "utf-8"))
-
+    msg["Subject"] = asunto
+    msg["From"] = SMTP_USER
+    msg["To"] = NOTIFY_EMAIL
+    msg["Message-ID"] = email.utils.make_msgid(domain="linkedin-agent.local")
+    msg.attach(MIMEText(texto, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, NOTIFY_EMAIL, msg.as_string())
-        message_id = msg.get("Message-ID", "")
-        log.info(f"✓ Email enviado a {NOTIFY_EMAIL} con {len(perfiles)} perfiles")
-
-        # Guardar estado de pendientes
-        pending = {
-            "sent_at":    sent_at,
-            "deadline":   (datetime.now(timezone.utc) + timedelta(hours=HOURS_TO_REPLY)).isoformat(),
-            "message_id": message_id,
-            "perfiles":   perfiles,
-        }
-        PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PENDING_FILE.write_text(json.dumps(pending, indent=2, ensure_ascii=False), encoding="utf-8")
-        return message_id
-
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+            s.ehlo(); s.starttls(); s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(SMTP_USER, [NOTIFY_EMAIL], msg.as_string())
+        log.info(f"✓ Correo enviado a {NOTIFY_EMAIL}: {asunto}")
+        return True
     except Exception as e:
-        log.error(f"Error enviando email: {e}")
-        return None
+        log.error(f"Error enviando correo: {e}")
+        return False
 
 
-# ── Lectura de respuestas vía IMAP ─────────────────────────────────────────────
-
-def _parse_reply_body(text: str) -> dict:
-    """
-    Extrae decisiones de texto como:
-      1: ACEPTAR
-      2: IGNORAR
-      3: ACEPTAR
-    Devuelve {1: "accept", 2: "ignore", ...}
-    """
-    decisions = {}
-    for line in text.splitlines():
-        line = line.strip()
-        m = re.match(r"(\d+)\s*[:.\-]\s*(aceptar|accept|ignorar|ignore)", line, re.IGNORECASE)
-        if m:
-            num = int(m.group(1))
-            raw = m.group(2).lower()
-            decisions[num] = "accept" if raw in ("aceptar", "accept") else "ignore"
-    return decisions
-
-
-def check_replies() -> list:
-    """
-    Lee el inbox de Gmail (IMAP_HOST) buscando respuestas al email de consulta.
-    Devuelve lista de decisiones procesadas.
-    """
-    if not PENDING_FILE.exists():
-        log.info("No hay perfiles pendientes de respuesta.")
-        return []
-
-    pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
-    perfiles  = pending["perfiles"]
-    sent_at   = datetime.fromisoformat(pending["sent_at"])
-    deadline  = datetime.fromisoformat(pending["deadline"])
-    now       = datetime.now(timezone.utc)
-
-    # Marcar como expirados los que superaron el deadline
-    if now > deadline:
-        log.info(f"Deadline de {HOURS_TO_REPLY}h superado. Perfiles sin respuesta → ignorar.")
-
-    if not SMTP_USER or not SMTP_PASS:
-        log.error("SMTP_USER o SMTP_PASS no configurados — no se puede leer IMAP")
-        return []
-
-    processed = []
-    reply_decisions = {}
-
-    try:
-        with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as mail:
-            mail.login(SMTP_USER, SMTP_PASS)
-            mail.select("INBOX")
-
-            # Buscar todos los emails desde la fecha de envío.
-            # No usamos SUBJECT filter: Gmail falla con corchetes [ ] en el asunto.
-            since_str = sent_at.strftime("%d-%b-%Y")
-            _, data = mail.search(None, f'SINCE {since_str}')
-
-            for num in data[0].split():
-                _, msg_data = mail.fetch(num, "(RFC822)")
-                raw_email = msg_data[0][1]
-                msg = email_lib.message_from_bytes(raw_email)
-
-                # Decodificar el asunto correctamente (puede venir en Base64 o QP)
-                raw_subject = msg.get("Subject", "")
-                decoded_parts = email.header.decode_header(raw_subject)
-                subject = ""
-                for part, charset in decoded_parts:
-                    if isinstance(part, bytes):
-                        subject += part.decode(charset or "utf-8", errors="ignore")
-                    else:
-                        subject += str(part)
-
-                # Solo procesar respuestas al email del agente
-                subject_lower = subject.lower()
-                is_reply = any(prefix in subject_lower for prefix in ("re:", "rе:"))  # ascii + unicode
-                has_agent = "linkedin" in subject_lower or "agent" in subject_lower
-                if not is_reply or not has_agent:
-                    continue
-
-                log.info(f"Reply encontrado: {subject[:80]}")
-
-                # Extraer cuerpo del email (texto plano primero)
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        ct = part.get_content_type()
-                        if ct == "text/plain":
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                body = payload.decode(
-                                    part.get_content_charset() or "utf-8",
-                                    errors="ignore"
-                                )
-                            break
-                else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(
-                            msg.get_content_charset() or "utf-8",
-                            errors="ignore"
-                        )
-
-                reply_decisions = _parse_reply_body(body)
-                if reply_decisions:
-                    log.info(f"Decisiones parseadas: {reply_decisions}")
-                    break  # tomar la primera respuesta válida con decisiones
-                else:
-                    log.warning(f"Reply encontrado pero sin decisiones válidas. Body preview: {body[:200]}")
-
-    except Exception as e:
-        log.error(f"Error leyendo IMAP: {e}")
-
-    # Construir decisiones finales
-    rows_csv = []
-    for i, perfil in enumerate(perfiles, 1):
-        if i in reply_decisions:
-            decision = reply_decisions[i]
-            fuente   = "email_reply"
-            log.info(f"[{i}] {perfil['nombre']} → {decision.upper()} (por email)")
-        elif now > deadline:
-            decision = "ignore"
-            fuente   = "timeout_48h"
-            log.info(f"[{i}] {perfil['nombre']} → IGNORAR (timeout 48h)")
-        else:
-            log.info(f"[{i}] {perfil['nombre']} → aún dentro del plazo, sin respuesta")
-            continue
-
-        row = {
-            "fecha":           now.strftime("%Y-%m-%d %H:%M"),
-            "nombre":          perfil.get("nombre"),
-            "cargo":           perfil.get("cargo"),
-            "conexiones_comun": perfil.get("conexiones_comun"),
-            "profile_url":     perfil.get("profile_url"),
-            "decision":        decision,
-            "score":           perfil.get("score", ""),
-            "reason":          perfil.get("reason", ""),
-            "fuente":          fuente,
-        }
-        rows_csv.append(row)
-        processed.append({"perfil": perfil, "decision": decision})
-
-    if rows_csv:
-        append_to_csv(rows_csv)
-        log.info(f"✓ {len(rows_csv)} decisiones registradas en {DECISIONS_CSV}")
-
-    # Limpiar pendientes si se procesaron todos
-    if len(processed) == len(perfiles):
-        PENDING_FILE.unlink(missing_ok=True)
-        log.info("Todos los perfiles procesados — archivo pendientes eliminado.")
-
-    return processed
-
-
-# ── Flujo principal ────────────────────────────────────────────────────────────
+# ── Flujo de envío ─────────────────────────────────────────────────────────────
 
 def notify_consult_profiles(dry_run: bool = False, resultados: list | None = None) -> None:
-    """Envía email con los perfiles 'consult' (de la lista recibida o de decisions_preview.json)."""
+    """Registra los perfiles 'consult' nuevos con un código y envía (o previsualiza) el correo."""
     if resultados is None:
         if not DECISIONS_FILE.exists():
-            log.error(f"No se encontró {DECISIONS_FILE}. Ejecuta evaluator.py primero.")
-            sys.exit(1)
+            log.error(f"No se encontró {DECISIONS_FILE}.")
+            return
         resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
-    consultar  = [r for r in resultados if r.get("decision") == "consult"]
 
+    state = load_state()
+    ya_pendientes = {v.get("profile_url") for v in state["items"].values() if v["estado"] == "pendiente"}
+    consultar = [r for r in resultados
+                 if r.get("decision") == "consult" and r.get("profile_url") not in ya_pendientes]
     if not consultar:
-        log.info("No hay perfiles 'consultar' en esta sesión.")
+        log.info("No hay perfiles nuevos para consultar.")
         return
 
-    log.info(f"Preparando email con {len(consultar)} perfiles para consultar...")
+    deadline = _now() + timedelta(hours=HOURS_TO_REPLY)
+    items = []
+    for r in consultar:
+        tok = new_token(state["items"])
+        item = {
+            "token": tok,
+            "nombre": r.get("nombre"), "cargo": r.get("cargo"),
+            "conexiones_comun": r.get("conexiones_comun"), "profile_url": r.get("profile_url"),
+            "score": r.get("score"), "reason": r.get("reason"),
+            "creado": _now().isoformat(), "plazo": deadline.isoformat(),
+            "estado": "pendiente", "ejecutado_en_linkedin": False,
+        }
+        items.append(item)
+        state["items"][tok] = item
+
+    asunto, html_body, texto = build_email(items, SMTP_USER or "agente@ejemplo.com", deadline)
 
     if dry_run:
-        print(f"\n── DRY-RUN: se enviaría email con {len(consultar)} perfiles ──")
-        for i, p in enumerate(consultar, 1):
-            print(f"  {i}. {p['nombre']} (score {p['score']}) — {p['reason'][:60]}")
-        return
+        PREVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PREVIEW_FILE.write_text(html_body, encoding="utf-8")
+        log.info(f"DRY-RUN: NO se envió correo. Vista previa con {len(items)} perfiles en {PREVIEW_FILE}")
+        return  # en dry-run no se guarda estado
 
-    send_consult_email(consultar)
+    if _send(asunto, html_body, texto):
+        save_state(state)
+
+
+def send_test_email() -> None:
+    """Correo de prueba con perfiles ficticios. Sus códigos no corresponden a nadie real."""
+    deadline = _now() + timedelta(hours=HOURS_TO_REPLY)
+    items = [
+        {"token": "PRUE-BA22", "nombre": "Persona de Prueba Uno", "cargo": "Gerente Comercial · Exportadora de fruta",
+         "conexiones_comun": 12, "profile_url": "", "reason": "Correo de prueba: toca un botón y envía para verificar el circuito."},
+        {"token": "PRUE-BA33", "nombre": "Persona de Prueba Dos", "cargo": "Consultora en calidad y certificaciones",
+         "conexiones_comun": 4, "profile_url": "", "reason": "Correo de prueba: no afecta a ninguna solicitud real."},
+    ]
+    asunto, html_body, texto = build_email(items, SMTP_USER or "agente@ejemplo.com", deadline)
+    if _send("[PRUEBA] " + asunto, html_body, texto):
+        state = load_state()
+        state["prueba_enviada"] = _now().isoformat()   # para que --check lea el buzón aunque no haya consultas reales
+        save_state(state)
+
+
+# ── Lectura de respuestas ──────────────────────────────────────────────────────
+
+def _decode(value: str) -> str:
+    out = ""
+    for part, charset in email.header.decode_header(value or ""):
+        out += part.decode(charset or "utf-8", errors="ignore") if isinstance(part, bytes) else part
+    return out
+
+
+def _sender_ok(msg) -> tuple:
+    """El remitente debe ser NOTIFY_EMAIL y, si REQUIRE_AUTH, pasar DMARC (o DKIM alineado)."""
+    _, addr = email.utils.parseaddr(_decode(msg.get("From", "")))
+    addr = addr.lower()
+    if not NOTIFY_EMAIL or addr != NOTIFY_EMAIL.lower():
+        return False, f"remitente no autorizado ({addr or 'vacío'})"
+    if not REQUIRE_AUTH:
+        return True, "remitente ok (sin verificación de firma)"
+    dominio = addr.split("@")[-1]
+    auth = " ".join(_decode(h) for h in (msg.get_all("Authentication-Results") or [])).lower()
+    if "dmarc=pass" in auth:
+        return True, "dmarc=pass"
+    if re.search(r"dkim=pass[^;]*header\.(?:i|d)=@?(?:[\w.-]+\.)?" + re.escape(dominio), auth):
+        return True, "dkim=pass alineado"
+    return False, "sin firma DMARC/DKIM válida del remitente"
+
+
+def _texto_propio(msg) -> str:
+    """Asunto + texto escrito por Darwing (sin el mensaje citado)."""
+    body = ""
+    part_iter = msg.walk() if msg.is_multipart() else [msg]
+    for part in part_iter:
+        if part.get_content_type() == "text/plain":
+            payload = part.get_payload(decode=True)
+            if payload:
+                body = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+            break
+    propias = []
+    for line in body.splitlines():
+        l = line.strip()
+        if l.startswith(">"):
+            continue
+        if re.match(r"^(on .+wrote:|el .+escribi[oó]:|-{2,}\s*original|de:\s|from:\s|enviado:|sent:)", l, re.I):
+            break
+        propias.append(l)
+    return _decode(msg.get("Subject", "")) + "\n" + "\n".join(propias)
+
+
+def parse_commands(texto: str) -> dict:
+    """{token: 'accept'|'ignore'}. Un código con órdenes contradictorias se descarta."""
+    result, conflict = {}, set()
+    for line in texto.splitlines():
+        cmd = CMD_RE.search(line)
+        if not cmd:
+            continue
+        decision = "accept" if cmd.group(1).upper() in ("ACEPTAR", "ACCEPT") else "ignore"
+        for a, b in TOKEN_RE.findall(line[cmd.end():].upper()):
+            tok = f"{a}-{b}"
+            if tok in result and result[tok] != decision:
+                conflict.add(tok)
+            result[tok] = decision
+    for tok in conflict:
+        result.pop(tok, None)
+    return result
+
+
+def apply_commands(state: dict, comandos: dict, fuente: str) -> list:
+    """Aplica órdenes a códigos pendientes y vigentes. Devuelve los cambios hechos."""
+    cambios = []
+    for tok, decision in comandos.items():
+        item = state["items"].get(tok)
+        if tok.startswith("PRUE-"):
+            log.info(f"✓ PRUEBA OK: llegó la orden {decision.upper()} {tok} desde el remitente verificado ({fuente}).")
+            continue
+        if not item:
+            log.warning(f"Código desconocido ignorado: {tok}")
+            continue
+        if item["estado"] != "pendiente":
+            log.info(f"Código {tok} ya resuelto ({item['estado']}) — sin cambios (un solo uso).")
+            continue
+        if _now() > datetime.fromisoformat(item["plazo"]):
+            log.info(f"Código {tok} llegó fuera de plazo — se mantiene la regla de vencimiento.")
+            continue
+        item["estado"] = "aprobado" if decision == "accept" else "ignorado"
+        item["resuelto"] = _now().isoformat()
+        item["fuente"] = fuente
+        cambios.append(item)
+    return cambios
+
+
+def expire_pending(state: dict) -> list:
+    vencidos = []
+    for item in state["items"].values():
+        if item["estado"] == "pendiente" and _now() > datetime.fromisoformat(item["plazo"]):
+            item["estado"] = "vencido"
+            item["resuelto"] = _now().isoformat()
+            item["fuente"] = f"sin_respuesta_{HOURS_TO_REPLY}h"
+            vencidos.append(item)
+    return vencidos
+
+
+def check_replies(dry_run: bool = False) -> list:
+    """
+    Lee el buzón del agente, aplica solo órdenes válidas de NOTIFY_EMAIL y vence lo que pasó de plazo.
+    Devuelve los perfiles APROBADOS y aún no ejecutados en LinkedIn (para actions.py).
+    """
+    state = load_state()
+    fechas = [datetime.fromisoformat(i["creado"]) for i in state["items"].values() if i["estado"] == "pendiente"]
+    prueba = state.get("prueba_enviada")
+    if prueba and _now() - datetime.fromisoformat(prueba) < timedelta(hours=HOURS_TO_REPLY):
+        fechas.append(datetime.fromisoformat(prueba))
+    if not fechas:
+        log.info("No hay consultas pendientes.")
+    elif not (SMTP_USER and SMTP_PASS):
+        log.error("SMTP_USER/SMTP_PASS no configurados — no se pueden leer respuestas.")
+    else:
+        desde = min(fechas)
+        try:
+            with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as mail:
+                mail.login(SMTP_USER, SMTP_PASS)
+                mail.select("INBOX", readonly=True)
+                _, data = mail.search(None, f'(SINCE {(desde - timedelta(days=1)).strftime("%d-%b-%Y")})')
+                ids = data[0].split()
+                revisados = con_ordenes = 0
+                for num in ids:
+                    revisados += 1
+                    _, msg_data = mail.fetch(num, "(RFC822)")
+                    msg = email.message_from_bytes(msg_data[0][1])
+                    mid = msg.get("Message-ID", f"sin-id-{num.decode()}")
+                    if mid in state["mensajes_procesados"]:
+                        continue
+                    comandos = parse_commands(_texto_propio(msg))
+                    if not comandos:
+                        continue
+                    con_ordenes += 1
+                    ok, motivo = _sender_ok(msg)
+                    if not ok:
+                        log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}. Asunto: {_decode(msg.get('Subject',''))[:80]}")
+                        state["mensajes_procesados"].append(mid)
+                        continue
+                    cambios = apply_commands(state, comandos, f"correo ({motivo})")
+                    for c in cambios:
+                        log.info(f"  {c['nombre']} → {c['estado'].upper()} (código {c['token']})")
+                    state["mensajes_procesados"].append(mid)
+            log.info(f"Buzón {SMTP_USER}: {revisados} correos revisados, {con_ordenes} con órdenes de aprobación.")
+        except Exception as e:
+            log.error(f"Error leyendo el buzón: {e}")
+
+    vencidos = expire_pending(state)
+    for v in vencidos:
+        log.info(f"  {v['nombre']} → sin respuesta en {HOURS_TO_REPLY} h: se ignora")
+
+    # Registrar en el historial las decisiones finales que no requieren LinkedIn
+    fecha = _now().strftime("%Y-%m-%d %H:%M")
+    filas = [{"fecha": fecha, "nombre": i["nombre"], "cargo": i["cargo"],
+              "conexiones_comun": i["conexiones_comun"], "profile_url": i["profile_url"],
+              "decision": "ignore", "score": i.get("score", ""), "reason": i.get("reason", ""),
+              "fuente": i["fuente"]}
+             for i in state["items"].values()
+             if i["estado"] in ("ignorado", "vencido") and not i.get("registrado")]
+
+    if dry_run:
+        log.info(f"DRY-RUN: estado de consultas no modificado ({len(filas)} decisiones se registrarían).")
+    else:
+        append_to_csv(filas)
+        for i in state["items"].values():
+            if i["estado"] in ("ignorado", "vencido"):
+                i["registrado"] = True
+        save_state(state)
+
+    return [dict(i, decision="accept") for i in state["items"].values()
+            if i["estado"] == "aprobado" and not i.get("ejecutado_en_linkedin")]
+
+
+def mark_executed(profile_urls: list) -> None:
+    """Marca como aceptados en LinkedIn los aprobados que actions.py realmente pulsó."""
+    if not profile_urls:
+        return
+    state = load_state()
+    urls = set(profile_urls)
+    for i in state["items"].values():
+        if i["estado"] == "aprobado" and i.get("profile_url") in urls:
+            i["ejecutado_en_linkedin"] = True
+            i["ejecutado"] = _now().isoformat()
+    save_state(state)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if "--check" in sys.argv:
-        check_replies()
-    elif "--send" in sys.argv or "--dry-run" in sys.argv:
-        dry_run = "--dry-run" in sys.argv
-        notify_consult_profiles(dry_run=dry_run)
+        aprobados = check_replies(dry_run="--dry-run" in sys.argv)
+        print(f"\nAprobados por correo pendientes de ejecutar en LinkedIn: {len(aprobados)}")
+    elif "--test" in sys.argv:
+        send_test_email()
+    elif "--preview" in sys.argv:
+        notify_consult_profiles(dry_run=True)
     else:
-        print("Uso: python agent/notifier.py --send | --check | --dry-run")
+        print("Uso: python agent/notifier.py --preview | --test | --check [--dry-run]")

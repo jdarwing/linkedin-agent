@@ -1,0 +1,91 @@
+{
+  "_version": "reglas-2026-10-16",
+  "_fuente": "Decisiones de Darwing sobre la propuesta v2 (D1C D2A D3C D4A D5A)",
+  "D1_conexiones_comun": {
+    "decision": "C",
+    "tramos": {
+      "debil": [
+        3,
+        9
+      ],
+      "verde": 10
+    },
+    "regla": "Las conexiones en común nunca cuentan como segundo criterio verde si el sector es 'otro'."
+  },
+  "D2_regla_de_oro": {
+    "decision": "A",
+    "regla": "Aceptar solo con >=2 criterios verdes distintos, al menos uno no autodeclarado. Se suspende la vía '1 fuerte + perfil completo' hasta tener foto y empresa confiables."
+  },
+  "D3_gerente_fundador_directivo": {
+    "decision": "C",
+    "regla": "'Gerente' o 'Fundador' cuenta como directivo solo si el sector es agro_core o agro_afin."
+  },
+  "D4_plazo_consulta_horas": {
+    "decision": "B",
+    "horas": 48,
+    "si_no_responde": "ignore",
+    "nota": "Cambiado de 24 a 48 h por Darwing el 16-oct-2026"
+  },
+  "D5_empresas_propias_y_grupo": {
+    "decision": "A",
+    "regla": "Quien declare trabajar o haber trabajado en estas empresas va a 'consult' con marca 'dice ser de <empresa>'; nunca aceptación automática por autodeclaración. Aceptación directa solo con URL en la lista de colaboradores verificados.",
+    "empresas": [
+      {
+        "nombre": "Agrícola Don Ricardo",
+        "variantes": [
+          "Agricola Don Ricardo",
+          "ADR"
+        ]
+      },
+      {
+        "nombre": "Nisira",
+        "variantes": []
+      },
+      {
+        "nombre": "Frutura",
+        "variantes": []
+      },
+      {
+        "nombre": "RRG",
+        "variantes": []
+      },
+      {
+        "nombre": "Subsole",
+        "variantes": [
+          "Sub Sole"
+        ]
+      },
+      {
+        "nombre": "Dayka & Hackett",
+        "variantes": [
+          "Dayka and Hackett",
+          "Dayka & Hacket",
+          "Dayka and Hacket",
+          "Dayka Hackett"
+        ]
+      },
+      {
+        "nombre": "Sun Belle",
+        "variantes": [
+          "Sunbelle"
+        ]
+      },
+      {
+        "nombre": "Montana",
+        "variantes": []
+      }
+    ],
+    "coincidencia": "palabra completa, sin distinguir mayúsculas ni tildes",
+    "colaboradores_verificados": []
+  },
+  "correo_consulta": {
+    "formato": "un toque por perfil (mailto con código único)",
+    "remitente_autorizado": "NOTIFY_EMAIL",
+    "verificacion": "DMARC o DKIM alineado",
+    "codigo": "aleatorio, un solo uso"
+  },
+  "MAX_PER_RUN": {
+    "valor": 25,
+    "nota": "25 solicitudes nuevas por corrida (decisión de Darwing, 16-oct)"
+  }
+}

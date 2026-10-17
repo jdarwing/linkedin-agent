@@ -30,7 +30,8 @@ DATA_FILE    = Path(os.getenv("DATA_FILE",    "data/pending_requests.json"))
 LOG_FILE     = Path(os.getenv("LOG_FILE",     "logs/agent.log"))
 
 INVITATIONS_URL = "https://www.linkedin.com/mynetwork/invitation-manager/received/"
-MAX_PER_RUN     = 30
+MAX_PER_RUN     = int(os.getenv("MAX_PER_RUN", "30"))
+DEBUG_HTML_FILE = Path(os.getenv("DEBUG_HTML_FILE", "data/debug_invitations.html"))
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -210,21 +211,72 @@ JS_EXTRACT = """
 
 # ── Scroll progresivo ──────────────────────────────────────────────────────────
 
-def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> None:
-    """Hace scroll hasta que se estabilizan los botones Accept visibles."""
-    prev = 0
-    stalls = 0
-    while stalls < 6:
-        count = page.evaluate("""
-            () => document.querySelectorAll('button').length
-        """)
-        if count >= prev + 5:
+# Cuenta las tarjetas reales (botón "Aceptar"/"Accept"), no todos los botones de la página
+JS_COUNT_CARDS = """
+() => Array.from(document.querySelectorAll('button')).filter(b => {
+  const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+  return t === 'aceptar' || t === 'accept';
+}).length
+"""
+
+# Total de invitaciones que declara LinkedIn en la página (si lo muestra), p. ej. "Recibidas (37)"
+JS_TOTAL = """
+() => {
+  const txt = document.body.innerText || '';
+  const m = txt.match(/(?:Recibidas|Received|Invitaciones|Invitations)\\s*\\(\\s*(\\d[\\d.,]*)\\s*\\)/i);
+  return m ? parseInt(m[1].replace(/[.,]/g, ''), 10) : null;
+}
+"""
+
+# Carga más tarjetas: lleva la última tarjeta a la vista (sirve aunque el scroll sea de un
+# contenedor interno y no de la ventana) y pulsa "Mostrar más"/"Show more" si existe.
+# Solo pulsa botones de paginación; nunca Aceptar/Ignorar.
+JS_LOAD_MORE = """
+() => {
+  const accept = Array.from(document.querySelectorAll('button')).filter(b => {
+    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+    return t === 'aceptar' || t === 'accept';
+  });
+  if (accept.length) accept[accept.length - 1].scrollIntoView({block: 'end'});
+  window.scrollBy(0, 800);
+  const more = Array.from(document.querySelectorAll('button')).find(b => {
+    const t = (b.innerText || b.textContent || '').trim();
+    return /^(mostrar|ver|cargar)\\s+más(\\s+invitaciones)?$|^(show|see|load)\\s+more(\\s+invitations)?$/i.test(t);
+  });
+  if (more && !more.disabled) {
+    more.scrollIntoView({block: 'center'});
+    more.click();
+    return 'mas';
+  }
+  return 'scroll';
+}
+"""
+
+
+def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> int:
+    """
+    Carga tarjetas hasta llegar a max_items o hasta que dejen de aparecer nuevas.
+    LinkedIn muestra ~10 invitaciones por página; el resto llega con scroll
+    dentro del contenedor o con el botón "Mostrar más".
+    """
+    prev, stalls, rondas, clics_mas = -1, 0, 0, 0
+    while stalls < 4 and rondas < 40:
+        count = page.evaluate(JS_COUNT_CARDS)
+        if count >= max_items:
+            break
+        if count > prev:
             stalls = 0
         else:
             stalls += 1
         prev = count
-        page.evaluate("window.scrollBy(0, 800)")
-        human_pause(1.2)
+        if page.evaluate(JS_LOAD_MORE) == "mas":
+            clics_mas += 1
+        rondas += 1
+        human_pause(1.5)
+    final = page.evaluate(JS_COUNT_CARDS)
+    log.info(f"Carga de tarjetas: {final} visibles tras {rondas} rondas "
+             f"({clics_mas} clics en 'Mostrar más').")
+    return final
 
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
@@ -288,11 +340,32 @@ def scrape_invitations(dry_run: bool = False) -> list:
 
         # ── Scroll para cargar todos los cards ────────────────────────────────
         log.info("Haciendo scroll para cargar todas las invitaciones...")
+        total_declarado = page.evaluate(JS_TOTAL)
+        if total_declarado is not None:
+            log.info(f"LinkedIn declara {total_declarado} invitaciones recibidas.")
         scroll_and_wait(page, MAX_PER_RUN)
 
         # ── Extraer datos con JavaScript ──────────────────────────────────────
         log.info("Extrayendo datos de los cards...")
         perfiles = page.evaluate(JS_EXTRACT)
+
+        # Chequeo de cobertura: avisar si se extrajo menos de lo esperado
+        if total_declarado:
+            esperado = min(total_declarado, MAX_PER_RUN)
+            if len(perfiles) < esperado:
+                log.warning(f"⚠ COBERTURA INCOMPLETA: {len(perfiles)} extraídos de {esperado} esperados "
+                            f"({total_declarado} declarados, tope {MAX_PER_RUN}).")
+        else:
+            log.warning("⚠ No se pudo leer el total de invitaciones en la página; cobertura no verificable.")
+
+        # En dry-run se guarda el HTML para ajustar selectores (queda local; está en .gitignore)
+        if dry_run:
+            try:
+                DEBUG_HTML_FILE.parent.mkdir(parents=True, exist_ok=True)
+                DEBUG_HTML_FILE.write_text(page.content(), encoding="utf-8")
+                log.info(f"HTML de la página guardado en {DEBUG_HTML_FILE} (solo diagnóstico local).")
+            except Exception as e:
+                log.warning(f"No se pudo guardar el HTML de diagnóstico: {e}")
 
         # Limitar al máximo por sesión
         perfiles = perfiles[:MAX_PER_RUN]
