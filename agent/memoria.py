@@ -3,6 +3,9 @@ memoria.py — Memoria completa, respaldo y datos mínimos (Fase 0)
 ================================================================
   - P3 / D10-A: se registra TODA decisión (también con el candado puesto), así cada
     perfil se visita una sola vez. Archivo: data/memoria.json, una entrada por URL.
+    La visita se anota ANTES de abrir el perfil, y lo leído queda guardado hasta que se
+    evalúa: si la corrida se corta, la siguiente evalúa sin volver a visitar (Mesa B, 2).
+    Si la memoria está dañada, la corrida se detiene antes de abrir LinkedIn (Mesa B, 4).
   - R17: respaldo diario local de consult_state.json, decisions.csv y memoria.json
     en data/respaldo/AAAA-MM-DD/ (se conservan 14 días).
   - D11-A: fotos y páginas de diagnóstico se borran al cerrar cada caso; lo no aceptado
@@ -49,18 +52,64 @@ def huella_url(url: str) -> str:
 
 # ── Memoria ────────────────────────────────────────────────────────────────────
 
+class MemoriaDanada(Exception):
+    """data/memoria.json existe pero no se puede leer: no se abre LinkedIn hasta restaurarla."""
+
+
 def cargar() -> dict:
-    if MEMORIA_FILE.exists():
-        return json.loads(MEMORIA_FILE.read_text(encoding="utf-8"))
-    return {"perfiles": {}}
+    if not MEMORIA_FILE.exists():
+        return {"perfiles": {}}
+    try:
+        mem = json.loads(MEMORIA_FILE.read_text(encoding="utf-8"))
+        if not isinstance(mem.get("perfiles"), dict):
+            raise ValueError("sin sección 'perfiles'")
+        return mem
+    except Exception as e:
+        raise MemoriaDanada(f"{MEMORIA_FILE} está dañado ({type(e).__name__}). "
+                            f"Se puede restaurar desde {RESPALDO_DIR}/<fecha>/memoria.json")
+
+
+def _privado(ruta: Path) -> None:
+    try:
+        os.chmod(ruta, 0o600)
+    except Exception:
+        pass
 
 
 def guardar(mem: dict) -> None:
     MEMORIA_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = MEMORIA_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(mem, indent=1, ensure_ascii=False), encoding="utf-8")
-    os.chmod(tmp, 0o600)
+    _privado(tmp)
     tmp.replace(MEMORIA_FILE)
+
+
+def marcar_visita(perfil: dict) -> None:
+    """Se llama ANTES de abrir el perfil: aunque la corrida se corte, no se vuelve a visitar."""
+    url = norm(perfil.get("profile_url"))
+    if not url:
+        return
+    mem = cargar()
+    clave = huella_url(url)
+    if clave not in mem["perfiles"]:
+        mem["perfiles"][clave] = {"url": url, "visto": _now().isoformat(), "estado": "por_evaluar",
+                                  "datos": dict(perfil)}
+        guardar(mem)
+
+
+def guardar_lectura(perfil: dict) -> None:
+    """Guarda lo leído del perfil hasta que se evalúe (luego se descarta: D11-A)."""
+    mem = cargar()
+    e = mem["perfiles"].get(huella_url(perfil.get("profile_url")))
+    if e is not None and e.get("estado") == "por_evaluar":
+        e["datos"] = dict(perfil)
+        guardar(mem)
+
+
+def por_evaluar() -> list:
+    """Perfiles ya visitados que todavía no se evaluaron (corrida cortada o ensayo)."""
+    return [dict(e["datos"]) for e in cargar()["perfiles"].values()
+            if e.get("estado") == "por_evaluar" and e.get("datos")]
 
 
 def registrar(resultados: list, version: str = "") -> int:
@@ -74,9 +123,12 @@ def registrar(resultados: list, version: str = "") -> int:
         clave = huella_url(url)
         if clave not in mem["perfiles"]:
             nuevos += 1
+        previo = mem["perfiles"].get(clave, {})
         mem["perfiles"][clave] = {
             "url": url,
-            "visto": _now().isoformat(),
+            "visto": previo.get("visto") or _now().isoformat(),
+            "evaluado": _now().isoformat(),
+            "estado": "evaluado",
             "decision_agente": r.get("decision"),
             "recomendacion": r.get("recomendacion", ""),
             "version_reglas": version,
@@ -91,15 +143,12 @@ def conocido(url: str, mem: dict | None = None) -> bool:
 
 
 def conocidos() -> set:
-    """Huellas de todas las URLs ya vistas (memoria, consultas y CSV)."""
+    """Huellas de todas las URLs ya vistas (memoria, consultas y CSV). Si algo está dañado, falla."""
     claves = set(cargar()["perfiles"].keys())
-    try:
-        if STATE_FILE.exists():
-            for v in json.loads(STATE_FILE.read_text(encoding="utf-8"))["items"].values():
-                if v.get("profile_url"):
-                    claves.add(huella_url(v["profile_url"]))
-    except Exception:
-        pass
+    if STATE_FILE.exists():
+        for v in json.loads(STATE_FILE.read_text(encoding="utf-8"))["items"].values():
+            if v.get("profile_url"):
+                claves.add(huella_url(v["profile_url"]))
     try:
         if DECISIONS_CSV.exists():
             with DECISIONS_CSV.open(encoding="utf-8") as f:
@@ -121,6 +170,7 @@ def anotar_csv(rows: list) -> None:
         if nuevo:
             w.writeheader()
         w.writerows(rows)
+    _privado(DECISIONS_CSV)
 
 
 # ── Respaldo diario (R17) ──────────────────────────────────────────────────────
@@ -152,6 +202,22 @@ def borrar_foto(ruta: str | None) -> None:
             p.unlink()
     except Exception:
         pass
+
+
+def borrar_fotos_huerfanas() -> int:
+    """Fotos que no pertenecen a una consulta abierta (p. ej., las de un ensayo). No toca el estado."""
+    if not FOTOS_DIR.exists():
+        return 0
+    abiertas = set()
+    if STATE_FILE.exists():
+        for it in json.loads(STATE_FILE.read_text(encoding="utf-8"))["items"].values():
+            if it.get("foto") and it.get("estado") in ("pendiente", "aprobado") and not it.get("ejecutado_en_linkedin"):
+                abiertas.add(str(Path(it["foto"]).resolve()))
+    n = 0
+    for f in FOTOS_DIR.iterdir():
+        if f.is_file() and str(f.resolve()) not in abiertas:
+            f.unlink(); n += 1
+    return n
 
 
 def borrar_temporales() -> list:
@@ -197,6 +263,7 @@ def purgar(dias: int = DIAS_RETENCION) -> dict:
                 res["anonimizados"] += 1
         tmp = STATE_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        _privado(tmp)
         tmp.replace(STATE_FILE)
 
     if FOTOS_DIR.exists():
@@ -221,10 +288,11 @@ def purgar(dias: int = DIAS_RETENCION) -> dict:
             with DECISIONS_CSV.open("w", newline="", encoding="utf-8") as f:
                 w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
                 w.writeheader(); w.writerows(filas)
+            _privado(DECISIONS_CSV)
 
     mem = cargar()
     for clave, v in mem["perfiles"].items():
         if v.get("url") and clave not in aprobados and datetime.fromisoformat(v["visto"]) < limite:
-            v.pop("url"); res["anonimizados"] += 1
+            v.pop("url"); v.pop("datos", None); res["anonimizados"] += 1
     guardar(mem)
     return res

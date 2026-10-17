@@ -105,6 +105,7 @@ def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(STATE_FILE)
 
 
@@ -130,6 +131,7 @@ def append_to_csv(rows: list) -> None:
         if write_header:
             w.writeheader()
         w.writerows(rows)
+    os.chmod(DECISIONS_CSV, 0o600)
 
 
 # ── Construcción del correo ────────────────────────────────────────────────────
@@ -549,10 +551,20 @@ def expire_pending(state: dict) -> list:
     return vencidos
 
 
-def _recepcion(cabecera_fetch: bytes) -> datetime | None:
-    """Hora de recepción en Gmail (INTERNALDATE), en UTC."""
-    tt = imaplib.Internaldate2tuple(cabecera_fetch or b"")
-    return datetime.fromtimestamp(time.mktime(tt), tz=timezone.utc) if tt else None
+# Resultado de la última revisión del buzón, para que el runner avise si algo falló
+ULTIMA_REVISION: dict = {}
+
+
+def _recepcion(msg_data: list) -> datetime | None:
+    """Hora de recepción en Gmail (INTERNALDATE), en UTC. Se busca en TODA la respuesta del servidor."""
+    for parte in msg_data:
+        trozos = [parte[0]] if isinstance(parte, tuple) else [parte]
+        for t in trozos:
+            if isinstance(t, bytes) and b"INTERNALDATE" in t:
+                tt = imaplib.Internaldate2tuple(t if t.lstrip()[:1].isdigit() else b"1 (" + t.strip(b" )") + b")")
+                if tt:
+                    return datetime.fromtimestamp(time.mktime(tt), tz=timezone.utc)
+    return None
 
 
 def leer_buzon(state: dict, desde: datetime, cambios_total: list, conectar=None) -> dict:
@@ -561,7 +573,7 @@ def leer_buzon(state: dict, desde: datetime, cambios_total: list, conectar=None)
     buzón de prueba. Devuelve un pequeño resumen para el log y las pruebas.
     """
     conectar = conectar or (lambda: imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT))
-    resumen = {"revisados": 0, "con_ordenes": 0, "rechazados": 0}
+    resumen = {"revisados": 0, "con_ordenes": 0, "rechazados": 0, "motivos": []}
     with conectar() as mail:
         mail.login(SMTP_USER, SMTP_PASS)
         mail.select("INBOX", readonly=True)          # R7: no marca como leído ni mueve nada
@@ -588,14 +600,16 @@ def leer_buzon(state: dict, desde: datetime, cambios_total: list, conectar=None)
                 ok, motivo = False, f"trae {len(comandos)} códigos (máximo {MAX_CODIGOS_POR_CORREO} por correo)"
             if not ok:
                 resumen["rechazados"] += 1
+                resumen["motivos"].append(motivo)
                 log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}.")
                 state["mensajes_procesados"].append(mid)
                 continue
-            recibido = _recepcion(partes[0][0])
+            recibido = _recepcion(msg_data)
             if recibido is None:
+                # No se marca como procesado: se reintenta en la próxima revisión
                 resumen["rechazados"] += 1
-                log.warning("⛔ Correo con órdenes RECHAZADO: no se pudo leer la hora de recepción.")
-                state["mensajes_procesados"].append(mid)
+                resumen["motivos"].append("no se pudo leer la hora de recepción (se reintentará)")
+                log.warning("⚠ No se pudo leer la hora de recepción de una respuesta; se reintentará.")
                 continue
             cambios = apply_commands(state, comandos, f"correo ({motivo})", recibido)
             for c in cambios:
@@ -612,8 +626,10 @@ def check_replies(dry_run: bool = False) -> list:
     Lee el buzón del agente, aplica solo órdenes válidas de NOTIFY_EMAIL y vence lo que pasó de plazo.
     Devuelve los perfiles APROBADOS que Darwing aún no acepta en la app (para el resumen).
     """
+    ULTIMA_REVISION.clear()
     state = load_state()
     cambios_total = []
+    buzon_ok = True
     fechas = [datetime.fromisoformat(i["creado"]) for i in state["items"].values() if i["estado"] == "pendiente"]
     prueba = state.get("prueba_enviada")
     if prueba and _now() - datetime.fromisoformat(prueba) < timedelta(hours=HOURS_TO_REPLY):
@@ -621,15 +637,22 @@ def check_replies(dry_run: bool = False) -> list:
     if not fechas:
         log.info("No hay consultas pendientes.")
     elif not (SMTP_USER and SMTP_PASS):
-        log.error("SMTP_USER/SMTP_PASS no configurados — no se pueden leer respuestas.")
+        buzon_ok = False
+        ULTIMA_REVISION["error"] = "Faltan SMTP_USER o SMTP_PASS: no se pueden leer tus respuestas."
+        log.error(ULTIMA_REVISION["error"])
     else:
         desde = min(fechas)
         try:
-            leer_buzon(state, desde, cambios_total)
+            res = leer_buzon(state, desde, cambios_total)
+            if res["motivos"]:
+                ULTIMA_REVISION["rechazos"] = res["motivos"]
         except Exception as e:
+            buzon_ok = False
+            ULTIMA_REVISION["error"] = f"No se pudo leer el buzón ({type(e).__name__}): tus respuestas no se están procesando."
             log.error(f"Error leyendo el buzón: {type(e).__name__}: {str(e)[:120]}")
 
-    vencidos = expire_pending(state)
+    # Si no se pudo leer el buzón, no se vence nada: tu respuesta podría estar allí
+    vencidos = expire_pending(state) if buzon_ok else []
     for v in vencidos:
         log.info(f"  {logconf.ref(v)} → sin respuesta en {HOURS_TO_REPLY} h: se ignora")
 

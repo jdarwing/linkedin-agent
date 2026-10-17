@@ -51,3 +51,6 @@ data/memoria.json
 data/alertas.json
 data/respaldo/
 data/*.tmp
+
+# Candado de ejecución (corrida vs. revisión horaria)
+data/.corrida.lock

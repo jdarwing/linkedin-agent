@@ -115,6 +115,10 @@ def build_user_message(perfil: dict) -> str:
     return "\n".join(partes)
 
 
+def clave_disponible() -> bool:
+    return bool(ANTHROPIC_API_KEY if PROVIDER == "anthropic" else OPENAI_API_KEY)
+
+
 def make_client():
     if PROVIDER == "anthropic":
         import anthropic

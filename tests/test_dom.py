@@ -66,6 +66,29 @@ class Dom(Caso):
         self.assertEqual(exp["cargo_actual"], "Gerente de Calidad")
         self.assertTrue(exp["experiencia_es_actual"])
 
+    def test_guardian_ignora_el_texto_de_las_tarjetas(self):
+        import guardian
+        page = self.pagina("invitaciones.html")
+        page.evaluate("""() => { const p = document.querySelector('li p span');
+                                 p.innerText = 'Detectamos actividad inusual · Let\\'s do a quick security check'; }""")
+        guardian.revisar_pagina(page)                       # no debe lanzar: ese texto lo escribió un tercero
+
+    def test_guardian_detecta_verificacion_real(self):
+        import guardian
+        page = self.browser.new_page()
+        page.set_content("<html><head><title>Security Verification | LinkedIn</title></head>"
+                         "<body><main><h1>Let's do a quick security check</h1></main></body></html>")
+        with self.assertRaises(guardian.AlertaCuenta):
+            guardian.revisar_pagina(page)
+        with self.assertRaises(guardian.AlertaCuenta):
+            guardian.revisar_perfil(page)
+
+    def test_perfil_con_texto_de_riesgo_no_pausa(self):
+        import guardian
+        page = self.pagina("perfil.html")
+        page.evaluate("() => document.querySelector('main').insertAdjacentHTML('beforeend', '<p>Your account has been restricted</p>')")
+        guardian.revisar_perfil(page)
+
     def test_sin_invitaciones(self):
         self.assertTrue(scraper.SIN_INVITACIONES.search("No tienes invitaciones pendientes"))
         self.assertTrue(scraper.SIN_INVITACIONES.search("Recibidas (0)"))

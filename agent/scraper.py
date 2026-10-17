@@ -47,10 +47,8 @@ MAX_PER_RUN     = int(os.getenv("MAX_PER_RUN", "30"))
 DEBUG_HTML_FILE = Path(os.getenv("DEBUG_HTML_FILE", "data/debug_invitations.html"))
 DEBUG_PERFIL_FILE = Path(os.getenv("DEBUG_PERFIL_FILE", "data/debug_perfil.html"))
 ENRIQUECER      = os.getenv("ENRIQUECER_PERFILES", "1") != "0"   # visitar cada perfil nuevo para leer cargo y empresa actuales
-LEER_TRAYECTORIA = os.getenv("LEER_TRAYECTORIA", "0") == "1"     # D10-A: apagado; sería una segunda visita por persona
 GUARDAR_DEBUG   = os.getenv("DEBUG_HTML", "0") == "1"              # D11-A: páginas de diagnóstico solo si se piden
 FOTOS_DIR       = Path(os.getenv("FOTOS_DIR", "data/fotos"))
-DEBUG_EXP_FILE  = Path(os.getenv("DEBUG_EXP_FILE", "data/debug_experiencia.html"))
 STATE_FILE      = Path(os.getenv("CONSULT_STATE_FILE", "data/consult_state.json"))
 DECISIONS_CSV   = Path(os.getenv("DECISIONS_CSV", "data/decisions.csv"))
 
@@ -297,12 +295,8 @@ def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> int:
 # ── Perfiles ya conocidos (para leer solo solicitudes NUEVAS) ─────────────────
 
 def perfiles_conocidos() -> set:
-    """Huellas de las URLs ya vistas: memoria completa, consultas y CSV (D10-A)."""
-    try:
-        return memoria.conocidos()
-    except Exception as e:
-        log.warning(f"No se pudo leer la memoria: {e}")
-        return set()
+    """Huellas de las URLs ya vistas: memoria completa, consultas y CSV (D10-A). Si está dañada, falla."""
+    return memoria.conocidos()
 
 
 # ── Enriquecimiento: cargo y empresa actuales desde el perfil ──────────────────
@@ -392,19 +386,6 @@ def interpretar_experiencia(lineas: list) -> dict:
     return {"cargo_actual": cargo[:120], "empresa_actual": empresa[:120], "experiencia_es_actual": actual}
 
 
-JS_TRAYECTORIA = """
-() => {
-  const main = document.querySelector('main') || document.body;
-  const out = [];
-  for (const l of (main.innerText || '').split('\\n')) {
-    const t = l.replace(/\\s+/g, ' ').trim();
-    if (t && out[out.length - 1] !== t) out.push(t);
-  }
-  return out.slice(0, 250);
-}
-"""
-
-
 def _slug(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "", (url or "").rstrip("/").split("/in/")[-1])[:80] or "perfil"
 
@@ -421,32 +402,7 @@ def descargar_foto(page, perfil: dict, url_foto: str) -> None:
             destino.write_bytes(r.body())
             perfil["foto"] = str(destino)
     except Exception as e:
-        log.warning(f"  No se pudo descargar la foto de {perfil.get('nombre')}: {e}")
-
-
-def leer_trayectoria(page, perfil: dict, dry_run: bool, primero: bool) -> None:
-    """Abre /details/experience/ y guarda el texto de toda la experiencia (empresas y cargos)."""
-    url = (perfil.get("profile_url") or "").rstrip("/") + "/details/experience/"
-    try:
-        time.sleep(random.uniform(2.0, 4.0))
-        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        time.sleep(random.uniform(2.5, 4.0))
-        motivo = guardian.revisar(page.url)
-        if motivo:
-            raise guardian.AlertaCuenta(motivo)
-        for _ in range(3):
-            page.evaluate("window.scrollBy(0, 1200)")
-            time.sleep(random.uniform(0.8, 1.5))
-        lineas = page.evaluate(JS_TRAYECTORIA)
-        # quitar encabezados y navegación típicos
-        lineas = [l for l in lineas if not re.match(r"^(Experiencia|Experience|Volver|Back|Mostrar|Show|Ver |See )", l)]
-        perfil["trayectoria"] = " | ".join(lineas)[:3000]
-        if GUARDAR_DEBUG and primero:
-            DEBUG_EXP_FILE.write_text(page.content(), encoding="utf-8")
-    except guardian.AlertaCuenta:
-        raise
-    except Exception as e:
-        log.warning(f"  No se pudo leer la experiencia de {perfil.get('nombre')}: {e}")
+        log.warning(f"  No se pudo descargar la foto de {logconf.ref(perfil)}: {type(e).__name__}")
 
 
 def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
@@ -455,12 +411,11 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
         url = perfil.get("profile_url")
         if not url:
             continue
+        memoria.marcar_visita(perfil)            # antes de abrir: si la corrida se corta, no se revisita
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             time.sleep(random.uniform(2.5, 4.5))
-            motivo = guardian.revisar(page.url)
-            if motivo:
-                raise guardian.AlertaCuenta(motivo)
+            guardian.revisar_perfil(page)
             for _ in range(10):                                 # la sección Experiencia carga al bajar
                 if page.evaluate(JS_HAY_EXPERIENCIA):
                     break
@@ -487,10 +442,9 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
                 descargar_foto(page, perfil, datos["foto_url"])
             if datos.get("experiencia_todas"):
                 perfil["trayectoria"] = " | ".join(datos["experiencia_todas"])[:3000]
-            if LEER_TRAYECTORIA:
-                leer_trayectoria(page, perfil, dry_run, primero=(k == 1))
             if GUARDAR_DEBUG and k == 1:
                 DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
+            memoria.guardar_lectura(perfil)
             log.info(f"  [{k}/{len(perfiles)}] {logconf.ref(perfil)}: "
                      f"cargo {'sí' if perfil.get('cargo_actual') else 'no'} · empresa {'sí' if perfil.get('empresa_actual') else 'no'} · "
                      f"trayectoria {'sí' if perfil.get('trayectoria') else 'no'}")

@@ -19,8 +19,12 @@ Lo que apruebas te vuelve como lista con enlaces para que lo aceptes tú en la a
 
 Pausa: si existe el archivo PAUSA en la carpeta del proyecto no corre nada, salvo un
 --dry-run pedido a mano. El guardián crea PAUSA solo ante una señal de LinkedIn.
+
+Falla cerrada (Mesa B): antes de abrir LinkedIn se verifican las reglas, la clave del
+modelo y la memoria. Si algo falla, la corrida se detiene SIN visitar a nadie y avisa.
 """
 
+import fcntl
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,17 +46,23 @@ log = logconf.get("runner")
 OK, DEGRADADA, DETENIDA, PAUSADA = 0, 1, 2, 3
 
 
-def preparar(dry_run: bool, conservar_lectura: bool = False) -> None:
+def preparar(dry_run: bool, conservar_lectura: bool = False, purgar: bool = True) -> None:
     """Respaldo diario, datos mínimos y limpieza de temporales (R17, D11-A)."""
     if not conservar_lectura:
         borrados = memoria.borrar_temporales()
         if borrados:
             log.info(f"Temporales con datos de perfiles borrados: {', '.join(borrados)}")
+        try:
+            memoria.borrar_fotos_huerfanas()
+        except Exception as e:
+            log.warning(f"No se pudieron borrar fotos sin caso abierto: {type(e).__name__}")
     if dry_run:
         return
     try:
         if memoria.respaldo_diario():
             log.info("✓ Respaldo diario del estado guardado en data/respaldo/.")
+        if not purgar:
+            return
         res = memoria.purgar()
         if res["fotos"] or res["anonimizados"]:
             log.info(f"Datos mínimos: {res['fotos']} fotos borradas, {res['anonimizados']} registros anonimizados.")
@@ -73,6 +83,34 @@ def registrar_lectura(resultados: list) -> None:
     log.info(f"✓ Memoria: {nuevos} perfiles nuevos registrados.")
 
 
+def verificaciones_previas() -> list:
+    """Todo lo que debe estar sano ANTES de abrir LinkedIn (Mesa B, hallazgos 1 y 4)."""
+    import evaluator
+    problemas = []
+    try:
+        evaluator.cargar_reglas()
+    except evaluator.ReglasError as e:
+        problemas.append(f"Reglas no disponibles: {e}.")
+    if not evaluator.clave_disponible():
+        problemas.append("Falta la clave del modelo de IA (llavero o .env).")
+    try:
+        memoria.conocidos()
+    except memoria.MemoriaDanada as e:
+        problemas.append(str(e))
+    except Exception as e:
+        problemas.append(f"El estado de consultas (consult_state.json) no se puede leer: {type(e).__name__}.")
+    return problemas
+
+
+def _motivos_correo() -> list:
+    m = []
+    if notifier.ULTIMA_REVISION.get("error"):
+        m.append(notifier.ULTIMA_REVISION["error"])
+    for r in notifier.ULTIMA_REVISION.get("rechazos", []):
+        m.append(f"Se rechazó una respuesta tuya: {r}. Si fuiste tú, vuelve a enviarla.")
+    return m
+
+
 def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> int:
     inicio = datetime.now(timezone.utc)
     log.info("=" * 60)
@@ -81,11 +119,18 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> int:
     preparar(dry_run, conservar_lectura=skip_scraper)
     motivos: list = []
 
+    # ── 0. Chequeo previo: sin reglas, clave o memoria sanas no se abre LinkedIn ──
+    problemas = verificaciones_previas()
+    if problemas:
+        alertas.enviar("DETENIDA", problemas + ["No se abrió LinkedIn ni se visitó a nadie."], dry_run)
+        return DETENIDA
+
     # ── 1. Respuestas del correo ───────────────────────────────────────────────
     try:
         pendientes_clic = notifier.check_replies(dry_run=dry_run)
         if pendientes_clic:
             log.info(f"👆 {len(pendientes_clic)} aprobados esperan que los aceptes tú en la app.")
+        motivos += _motivos_correo()
     except Exception as e:
         motivos.append(f"No se pudo revisar el correo: {type(e).__name__}.")
 
@@ -99,21 +144,34 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> int:
             perfiles = scraper.scrape_invitations(dry_run=dry_run)
         except guardian.AlertaCuenta as e:
             guardian.pausar(str(e))
-            alertas.enviar("GUARDIÁN", [str(e)])
+            if alertas.enviar("GUARDIÁN", [str(e)]):
+                guardian.marcar_aviso_enviado()
             log.error("⛔ Guardián: agente en PAUSA total hasta que Darwing lo autorice.")
             return PAUSADA
         except SystemExit:
             alertas.enviar("DETENIDA", ["Falta la sesión de LinkedIn (data/session.json): hay que correr auth.py."], dry_run)
+            return DETENIDA
+        except memoria.MemoriaDanada as e:
+            alertas.enviar("DETENIDA", [str(e)], dry_run)
             return DETENIDA
         except Exception as e:
             alertas.enviar("DEGRADADA", [f"La lectura de LinkedIn falló: {type(e).__name__}."] + motivos, dry_run)
             return DEGRADADA
         motivos += scraper.DIAGNOSTICO.get("alertas", [])
         if not dry_run:
-            n = notifier.cerrar_aprobados_ausentes(scraper.DIAGNOSTICO.get("urls_visibles", []),
-                                                   scraper.DIAGNOSTICO.get("cobertura_completa", False))
-            if n:
-                log.info(f"✓ {n} aprobados ya no están en Recibidas: los aceptaste en la app.")
+            try:
+                n = notifier.cerrar_aprobados_ausentes(scraper.DIAGNOSTICO.get("urls_visibles", []),
+                                                       scraper.DIAGNOSTICO.get("cobertura_completa", False))
+                if n:
+                    log.info(f"✓ {n} aprobados ya no están en Recibidas: los aceptaste en la app.")
+            except Exception as e:
+                motivos.append(f"No se pudo actualizar la lista de aprobados: {type(e).__name__}.")
+        # Visitados en una corrida anterior que se cortó, o en un ensayo: se evalúan sin volver a visitarlos
+        vistos = {memoria.huella_url(p.get("profile_url")) for p in perfiles or []}
+        pendientes = [p for p in memoria.por_evaluar() if memoria.huella_url(p.get("profile_url")) not in vistos]
+        if pendientes:
+            log.info(f"{len(pendientes)} perfiles ya visitados se evalúan ahora (sin volver a visitarlos).")
+            perfiles = (perfiles or []) + pendientes
         if not perfiles:
             log.info("No hay solicitudes nuevas.")
             return _cerrar(motivos, dry_run)
@@ -168,21 +226,62 @@ def _cerrar(motivos: list, dry_run: bool, inicio: datetime | None = None) -> int
 
 
 def run_solo_correo() -> int:
-    preparar(dry_run=False, conservar_lectura=True)
+    """Revisión horaria: solo el correo. La limpieza de datos se hace en la corrida completa (Mesa B, 8)."""
+    preparar(dry_run=False, conservar_lectura=True, purgar=False)
     notifier.check_replies()
+    motivos = _motivos_correo()
+    if motivos:
+        alertas.enviar("DEGRADADA", motivos)
+        return DEGRADADA
     return OK
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
+def main(args: list) -> int:
     dry_run = "--dry-run" in args
 
     if guardian.en_pausa():
+        motivo = guardian.aviso_pendiente()
+        if motivo and alertas.enviar("GUARDIÁN", [motivo]):       # el aviso no había salido: se reintenta
+            guardian.marcar_aviso_enviado()
         if not dry_run:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Omitido: agente en PAUSA (ver archivo PAUSA).")
-            sys.exit(PAUSADA)
+            return PAUSADA
         log.warning("Agente en PAUSA: se permite solo este ensayo pedido a mano (--dry-run).")
 
-    if "--solo-correo" in args or "--check-replies" in args:
-        sys.exit(run_solo_correo())
-    sys.exit(run_pipeline(dry_run=dry_run, skip_scraper="--skip-scraper" in args))
+    solo_correo = "--solo-correo" in args or "--check-replies" in args
+    candado = candado_ejecucion(esperar=not solo_correo)
+    if candado is None:
+        log.info("Otra corrida está en curso: la revisión del correo se hace en la próxima hora.")
+        return OK
+    if solo_correo:
+        return run_solo_correo()
+    return run_pipeline(dry_run=dry_run, skip_scraper="--skip-scraper" in args)
+
+
+def candado_ejecucion(esperar: bool):
+    """
+    Evita que la revisión horaria del correo y la corrida programada escriban el estado a la vez.
+    La corrida espera su turno; la revisión horaria, si está ocupado, se salta (vuelve en una hora).
+    """
+    ruta = Path("data/.corrida.lock")
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    f = open(ruta, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | (0 if esperar else fcntl.LOCK_NB))
+    except BlockingIOError:
+        f.close()
+        return None
+    return f
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except SystemExit:
+        raise
+    except Exception as e:                       # nada termina en silencio (Mesa B, 5)
+        log.exception("Error no previsto")
+        try:
+            alertas.enviar("DETENIDA", [f"Error no previsto: {type(e).__name__}. Revisa logs/agent.log."])
+        finally:
+            sys.exit(DETENIDA)

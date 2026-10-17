@@ -51,6 +51,20 @@ except Exception:
     pw.sync_api = api
     sys.modules.setdefault("playwright", pw); sys.modules.setdefault("playwright.sync_api", api)
 
+# Ninguna prueba puede conectarse a Gmail ni a otro servidor
+import imaplib  # noqa: E402
+import smtplib  # noqa: E402
+import socket   # noqa: E402
+
+
+def _sin_red(*a, **k):
+    raise ConnectionRefusedError("Red bloqueada en las pruebas")
+
+
+imaplib.IMAP4_SSL = _sin_red
+smtplib.SMTP = _sin_red
+socket.create_connection = _sin_red
+
 sys.path.insert(0, str(AGENTE))
 import secretos  # noqa: E402
 secretos._llavero = lambda nombre: ""               # nunca leer el llavero real

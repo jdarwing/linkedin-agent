@@ -29,8 +29,11 @@ def configurar() -> None:
         archivo = TimedRotatingFileHandler(LOG_FILE, when="W0", backupCount=13, encoding="utf-8")
         archivo.setFormatter(fmt)
         raiz.addHandler(archivo)
+    # Bajo launchd la consola va a cron.log / correo.log, que no rotan: ahí solo advertencias y errores
     consola = logging.StreamHandler(sys.stdout)
     consola.setFormatter(fmt)
+    if not sys.stdout.isatty() and os.getenv("LOG_SOLO_CONSOLA") != "1":
+        consola.setLevel(logging.WARNING)
     raiz.addHandler(consola)
     _CONFIGURADO = True
 

@@ -122,14 +122,19 @@ para que lo aceptes tú en la app. El código del clic (`agent/actions.py`) se e
     python agent/runner.py --dry-run --skip-scraper
     open data/email_preview.html
 
-**Claves en el llavero de macOS** (opcional, recomendado). Cada comando pide la clave sin mostrarla;
-después se puede borrar esa línea del `.env`:
+**Claves en el llavero de macOS** (opcional, recomendado). Cada comando pide la clave sin mostrarla.
+No borres la línea del `.env` hasta comprobar que el agente la lee desde launchd (la primera corrida
+programada debe enviar su correo con normalidad); si el llavero no responde, el agente usa el `.env`:
 
     security add-generic-password -U -s linkedin-agent -a OPENAI_API_KEY -w
     security add-generic-password -U -s linkedin-agent -a SMTP_PASS -w
 
 **Inicio de sesión en LinkedIn:** `python agent/auth.py` abre la ventana y tú escribes la contraseña.
 Ya no se guarda en `.env`.
+
+**Falla cerrada:** antes de abrir LinkedIn se verifican las reglas, la clave del modelo y la memoria
+(`data/memoria.json`). Si algo falla, no se visita a nadie y te llega un aviso DETENIDA. Una memoria
+dañada se restaura copiando `data/respaldo/<fecha>/memoria.json`.
 
 **Códigos de salida de la corrida:** 0 normal · 1 DEGRADADA (te llega un aviso) · 2 DETENIDA · 3 en PAUSA.
 
