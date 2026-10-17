@@ -178,12 +178,21 @@ class Contenido(Caso):
         self.assertNotIn("<script>", cuerpo)
         self.assertNotIn("javascript:", cuerpo)
 
+    def test_enlaces_iphone_app_y_mac_chrome(self):
+        asunto, cuerpo, texto = notifier.build_email(self.items(), "a@gmail.com", datetime.now(timezone.utc))
+        self.assertIn('href="googlechromes://www.linkedin.com/in/x"', cuerpo)
+        self.assertIn('href="https://www.linkedin.com/in/x"', cuerpo)
+        self.assertIn("📱 iPhone", cuerpo); self.assertIn("💻 Mac", cuerpo)
+        self.assertNotIn("googlechromes://javascript", cuerpo)
+        self.assertEqual(notifier._chrome_url("https://evil.com/in/x"), "")
+
     def test_lista_para_el_clic_de_darwing(self):
         st = estado_con(["K7F2-9QXA", "3K7Z-RTW7"])
         st["items"]["K7F2-9QXA"]["estado"] = "aprobado"
         st["items"]["3K7Z-RTW7"].update(estado="aprobado", ejecutado_en_linkedin=True)
         h = notifier.lista_clic_html(st)
         self.assertIn("Para aceptar tú en LinkedIn (1)", h)
+        self.assertIn("googlechromes://www.linkedin.com/in/persona-0", h)
         self.assertIn("https://www.linkedin.com/in/persona-0", h)
         self.assertNotIn("persona-1", h)
 

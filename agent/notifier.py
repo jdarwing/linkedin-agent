@@ -141,6 +141,29 @@ def _safe_url(url: str) -> str:
     return url if url.startswith("https://www.linkedin.com/in/") else ""
 
 
+def _chrome_url(url: str) -> str:
+    """
+    Enlace para la Mac: lo atiende la mini app AbrirEnChrome (herramientas/instalar_abrir_en_chrome.sh),
+    que abre el perfil en Google Chrome aunque el navegador predeterminado sea otro.
+    Solo para perfiles de LinkedIn ya validados por _safe_url.
+    """
+    url = _safe_url(url)
+    return "googlechromes://" + url[len("https://"):] if url else ""
+
+
+def _enlaces_perfil(url: str, texto: str = "") -> str:
+    """
+    Dos enlaces por perfil:
+      📱 iPhone → enlace normal: Mail de Apple lo entrega a la app de LinkedIn.
+      💻 Mac    → googlechromes://: la mini app AbrirEnChrome lo abre en Chrome.
+    """
+    url = _safe_url(url)
+    if not url:
+        return ""
+    return (f' · <a href="{html.escape(url)}" style="color:#0a66c2;font-weight:bold;text-decoration:none;">📱 iPhone</a>'
+            f' · <a href="{html.escape(_chrome_url(url))}" style="color:#0a66c2;font-weight:bold;text-decoration:none;">💻 Mac</a>')
+
+
 def _mailto(agent_addr: str, asunto: str, cuerpo: str) -> str:
     cuerpo = cuerpo.replace("\n", "\r\n")
     return f"mailto:{agent_addr}?subject={quote(asunto)}&body={quote(cuerpo)}"
@@ -224,14 +247,13 @@ def lista_clic_html(state: dict) -> str:
         return ""
     filas = ""
     for k, it in enumerate(pend, 1):
-        url = _safe_url(it.get("profile_url"))
         nombre = html.escape(it.get("nombre") or "")
-        enlace = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">abrir perfil</a>' if url else "")
+        enlace = _enlaces_perfil(it.get("profile_url"), "abrir")
         filas += f'<li style="margin:2px 0;">{k}. {nombre}{enlace}</li>'
     return f"""
   <div style="background:#ffffff;border:1px solid #15803d;border-radius:8px;padding:14px 16px;margin:0 0 16px;font-size:14px;">
     <div style="font-weight:bold;margin-bottom:6px;">👆 Para aceptar tú en LinkedIn ({len(pend)})</div>
-    <div style="color:#52525b;margin-bottom:6px;">Ya los aprobaste. Ábrelos desde la app de LinkedIn (Mi red → Invitaciones) y pulsa Aceptar. El agente no hace clic.</div>
+    <div style="color:#52525b;margin-bottom:6px;">Ya los aprobaste. Toca 📱 iPhone (abre la app de LinkedIn) o 💻 Mac (abre Chrome) y pulsa Aceptar. El agente no hace clic.</div>
     <ul style="margin:4px 0 0;padding-left:18px;list-style:none;">{filas}</ul>
   </div>"""
 
@@ -264,7 +286,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
             razon_txt = razon_txt[:217].rsplit(" ", 1)[0] + "…"
         razon = html.escape(razon_txt)
         comunes = int(it.get("conexiones_comun") or 0)
-        ver = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">ver perfil</a>' if url else "")
+        ver = _enlaces_perfil(url, "ver perfil")
         extra = f" · 📍 {ubic}" if ubic else ""
         tags = it.get("trayectoria_tags") or []
         tray_html = (f'<div style="font-size:13px;color:#15803d;margin-top:4px;">🍇 Trayectoria: {html.escape(", ".join(tags[:3]))}</div>'

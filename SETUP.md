@@ -140,3 +140,9 @@ dañada se restaura copiando `data/respaldo/<fecha>/memoria.json`.
 
 **Guardián:** si LinkedIn pide verificación o muestra un aviso, el agente crea el archivo `PAUSA`
 y te escribe. No vuelve a correr hasta que borres `PAUSA`.
+
+**Enlaces de perfiles en el correo:** cada perfil trae dos botones. 📱 iPhone abre la app de LinkedIn;
+💻 Mac abre Google Chrome, aunque el navegador predeterminado sea otro. Para que funcione el botón de la
+Mac, corre una sola vez:
+
+    bash ~/Proyectos/linkedin-agent/herramientas/instalar_abrir_en_chrome.sh
