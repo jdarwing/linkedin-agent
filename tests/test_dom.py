@@ -80,6 +80,27 @@ class Dom(Caso):
                          "<body><main><h1>Let's do a quick security check</h1></main></body></html>")
         with self.assertRaises(guardian.AlertaCuenta):
             guardian.revisar_pagina(page)
+
+    def test_guardian_ve_avisos_de_linkedin_en_li_N3(self):
+        import guardian
+        page = self.pagina("invitaciones.html")
+        page.evaluate("""() => document.body.insertAdjacentHTML('beforeend',
+            '<ul><li class="artdeco-toast-item">Tu cuenta ha sido restringida temporalmente</li></ul>')""")
+        with self.assertRaises(guardian.AlertaCuenta):
+            guardian.revisar_pagina(page)
+
+    def test_nombre_que_imita_verificacion_no_pausa_N2(self):
+        import guardian
+        page = self.browser.new_page()
+        page.set_content("<html><head><title>Verificación de seguridad Pérez | LinkedIn</title></head>"
+                         "<body><main><h1>Verificación de seguridad Pérez</h1></main></body></html>")
+        guardian.revisar_perfil(page)
+
+    def test_captcha_incrustado_en_perfil_pausa(self):
+        import guardian
+        page = self.browser.new_page()
+        page.set_content("<html><body><main><iframe src='about:blank#captcha'></iframe>"
+                         "<div id='captcha-internal'></div></main></body></html>")
         with self.assertRaises(guardian.AlertaCuenta):
             guardian.revisar_perfil(page)
 

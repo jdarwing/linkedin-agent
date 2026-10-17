@@ -8,7 +8,8 @@ Lo que apruebas te vuelve como lista con enlaces para que lo aceptes tú en la a
   CORRIDA COMPLETA (lunes, miércoles y viernes, vía run_scheduled.sh):
     python agent/runner.py
 
-  ENSAYO (lee LinkedIn y evalúa, pero no envía correos ni guarda estado):
+  ENSAYO (lee LinkedIn y evalúa, no envía correos ni cambia consultas; solo anota en la
+  memoria a quién visitó, para no volver a visitarlo, y la corrida real lo evalúa después):
     python agent/runner.py --dry-run
 
   ENSAYO SIN ABRIR LINKEDIN (reusa data/pending_requests.json):
@@ -25,7 +26,9 @@ modelo y la memoria. Si algo falla, la corrida se detiene SIN visitar a nadie y 
 """
 
 import fcntl
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -102,12 +105,20 @@ def verificaciones_previas() -> list:
     return problemas
 
 
+_TEXTO_RECHAZO = {
+    "firma": "Llegó un correo con órdenes a tu nombre que no pasó la verificación de firma. "
+             "Si lo enviaste tú, vuelve a enviarlo; si no, alguien intentó suplantarte.",
+    "tope": "Llegó un correo con órdenes para más de 25 personas y se rechazó entero. Divide la respuesta.",
+    "hora_ilegible": "Una respuesta tuya se descartó porque Gmail no entregó su hora de recepción. Vuelve a enviarla.",
+}
+
+
 def _motivos_correo() -> list:
     m = []
     if notifier.ULTIMA_REVISION.get("error"):
         m.append(notifier.ULTIMA_REVISION["error"])
-    for r in notifier.ULTIMA_REVISION.get("rechazos", []):
-        m.append(f"Se rechazó una respuesta tuya: {r}. Si fuiste tú, vuelve a enviarla.")
+    for r in dict.fromkeys(notifier.ULTIMA_REVISION.get("rechazos", [])):
+        m.append(_TEXTO_RECHAZO.get(r, f"Se rechazó una respuesta: {r}."))
     return m
 
 
@@ -203,15 +214,23 @@ def run_pipeline(dry_run: bool = False, skip_scraper: bool = False) -> int:
     log.info(f"Resultado: {len(consulta)} a tu decisión ({recomienda} con recomendación de aceptar) | "
              f"{ignora} ignorados por el agente (solo registro local, no toca LinkedIn).")
 
-    if not dry_run:
-        registrar_lectura(resultados)
-
-    # ── 4. Correo de consulta ──────────────────────────────────────────────────
+    # ── 4. Correo de consulta (antes de dar a nadie por evaluado: Mesa B, N1) ──
+    enviado = True
     if consulta:
         try:
-            notifier.notify_consult_profiles(dry_run=dry_run, resultados=resultados)
+            enviado = notifier.notify_consult_profiles(dry_run=dry_run, resultados=resultados)
         except Exception as e:
-            motivos.append(f"No se pudo enviar el correo de consulta: {type(e).__name__}.")
+            log.error(f"Error enviando el correo de consulta: {type(e).__name__}")
+            enviado = False
+        if not enviado:
+            motivos.append(f"No salió el correo de consulta: {len(consulta)} personas quedan pendientes "
+                           "y se te consultarán en la próxima corrida.")
+
+    if not dry_run:
+        registrar_lectura(resultados if enviado else [r for r in resultados if r["decision"] != "consult"])
+        if not enviado:
+            for r in consulta:
+                memoria.marcar_visita(r)          # siguen "por evaluar": la próxima corrida las retoma
 
     return _cerrar(motivos, dry_run, inicio)
 
@@ -251,6 +270,11 @@ def main(args: list) -> int:
     solo_correo = "--solo-correo" in args or "--check-replies" in args
     candado = candado_ejecucion(esperar=not solo_correo)
     if candado is None:
+        horas = horas_candado_tomado()
+        if horas > HORAS_MAX_CANDADO:
+            alertas.enviar("DEGRADADA", [f"La corrida programada lleva {horas:.0f} horas sin terminar: "
+                                         "tus respuestas no se están procesando. Revisa la Mac."])
+            return DEGRADADA
         log.info("Otra corrida está en curso: la revisión del correo se hace en la próxima hora.")
         return OK
     if solo_correo:
@@ -258,20 +282,33 @@ def main(args: list) -> int:
     return run_pipeline(dry_run=dry_run, skip_scraper="--skip-scraper" in args)
 
 
+CANDADO = Path("data/.corrida.lock")
+HORAS_MAX_CANDADO = 4
+
+
 def candado_ejecucion(esperar: bool):
     """
     Evita que la revisión horaria del correo y la corrida programada escriban el estado a la vez.
     La corrida espera su turno; la revisión horaria, si está ocupado, se salta (vuelve en una hora).
+    Quien obtiene el candado anota la hora; así se detecta una corrida colgada (Mesa B, N6).
     """
-    ruta = Path("data/.corrida.lock")
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    f = open(ruta, "w")
+    CANDADO.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(CANDADO, os.O_RDWR | os.O_CREAT, 0o600)
+    f = os.fdopen(fd, "r+")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | (0 if esperar else fcntl.LOCK_NB))
     except BlockingIOError:
         f.close()
         return None
+    f.seek(0); f.truncate(); f.write(str(time.time())); f.flush()
     return f
+
+
+def horas_candado_tomado() -> float:
+    try:
+        return (time.time() - float(CANDADO.read_text().strip() or 0)) / 3600
+    except Exception:
+        return 0.0
 
 
 if __name__ == "__main__":

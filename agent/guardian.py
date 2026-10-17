@@ -8,7 +8,7 @@ a correr cuando Darwing borra el archivo PAUSA.
 Para que un tercero no pueda pausar el agente (Mesa B, hallazgo 3):
   - las direcciones de riesgo se buscan solo en rutas propias de LinkedIn, nunca dentro de /in/;
   - el texto de la página se lee SIN las tarjetas de invitación (que escriben otros);
-  - en los perfiles solo se miran la dirección, el título de la pestaña y un captcha incrustado.
+  - en los perfiles solo se miran la dirección y un captcha incrustado.
 """
 
 import re
@@ -32,7 +32,16 @@ JS_TEXTO_PROPIO = """
 () => {
   const c = document.body ? document.body.cloneNode(true) : null;
   if (!c) return {texto: '', titulo: document.title || '', captcha: false};
-  c.querySelectorAll('li, [role="listitem"], script, style').forEach(e => e.remove());
+  // Se quitan solo las tarjetas de invitación (las que tienen botón Aceptar): las escribe un tercero.
+  // Los avisos de LinkedIn (p. ej., los "toast", que también son <li>) se conservan.
+  c.querySelectorAll('button').forEach(b => {
+    const x = (b.innerText || b.textContent || '').trim().toLowerCase();
+    if (x === 'aceptar' || x === 'accept') {
+      const card = b.closest('li, [role="listitem"]');
+      if (card) card.remove();
+    }
+  });
+  c.querySelectorAll('script, style').forEach(e => e.remove());
   const captcha = !!document.querySelector('iframe[src*="captcha" i], #captcha-internal, [id*="captcha" i] iframe');
   return {texto: (c.innerText || c.textContent || '').slice(0, 5000), titulo: document.title || '', captcha};
 }
@@ -71,12 +80,12 @@ def revisar_pagina(page) -> None:
 
 
 def revisar_perfil(page) -> None:
-    """Perfil de un tercero: solo dirección, título de la pestaña y captcha incrustado (nunca su texto)."""
+    """
+    Perfil de un tercero: solo la dirección y un captcha incrustado. Ni su texto ni el título de
+    la pestaña (que lleva su nombre y podría imitar "Verificación de seguridad").
+    """
     d = _datos(page)
-    titulo = d.get("titulo", "")
     motivo = revisar(page.url) or ("La página muestra un captcha" if d.get("captcha") else "")
-    if not motivo and re.search(r"^(security verification|verificaci[oó]n de seguridad)\b", titulo, re.I):
-        motivo = f"La pestaña dice «{titulo[:60]}»"
     if motivo:
         raise AlertaCuenta(motivo)
 

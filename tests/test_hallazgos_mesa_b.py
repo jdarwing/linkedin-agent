@@ -177,5 +177,47 @@ class H13_SinSegundaVisita(unittest.TestCase):
         self.assertNotIn("def leer_trayectoria", src)
 
 
+class N1_CorreoQueNoSale(Base):
+    def test_nadie_se_pierde_si_falla_el_envio(self):
+        memoria.marcar_visita({"nombre": "Ana", "profile_url": "https://www.linkedin.com/in/ana", "cargo": "Gerente",
+                               "conexiones_comun": 1})
+        evaluator.make_client = lambda: ClienteFalso(['{"decision":"consult","score":5,"reason":"c"}',
+                                                      '{"decision":"consult","score":5,"reason":"c"}'])
+        notifier._send = lambda a, h, t: self.enviados.append("FALLÓ:" + a) and False
+        self.assertEqual(runner.run_pipeline(), runner.DEGRADADA)
+        self.assertEqual(len(memoria.por_evaluar()), 1)          # sigue pendiente
+        self.assertEqual(notifier.load_state()["items"], {})
+        notifier._send = lambda a, h, t: self.enviados.append(a) or True
+        runner.run_pipeline()
+        self.assertEqual(memoria.por_evaluar(), [])
+        self.assertEqual(len(notifier.load_state()["items"]), 1)  # ahora sí te llegó
+
+
+class N5_ReintentosDeHora(Base):
+    def test_tope_de_tres_reintentos(self):
+        from tests.test_correo import FakeIMAP, correo
+        st = estado_con(["K7F2-9QXA"])
+        class SinHora(FakeIMAP):
+            def fetch(self, num, partes):
+                raw, _ = self.mensajes[int(num) - 1]
+                return "OK", [(b"1 (BODY[] {%d}" % len(raw), raw), b")"]
+        for i in range(3):
+            fake = SinHora([(correo(), datetime.now(timezone.utc))])
+            res = notifier.leer_buzon(st, datetime.now(timezone.utc) - timedelta(hours=1), [], conectar=lambda: fake)
+        self.assertEqual(res["motivos"], ["hora_ilegible"])
+        self.assertIn("<m1@hotmail.com>", st["mensajes_procesados"])
+
+
+class N6_CorridaColgada(Base):
+    def test_aviso_si_el_candado_lleva_mas_de_4_horas(self):
+        tomado = runner.candado_ejecucion(esperar=False)
+        runner.CANDADO.write_text(str(datetime.now().timestamp() - 5 * 3600))
+        try:
+            self.assertEqual(runner.main(["--solo-correo"]), runner.DEGRADADA)
+        finally:
+            tomado.close()
+        self.assertTrue(any("DEGRADADA" in a for a in self.enviados))
+
+
 if __name__ == "__main__":
     unittest.main()

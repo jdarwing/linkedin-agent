@@ -357,12 +357,16 @@ def _send(asunto: str, html_body: str, texto: str) -> bool:
 
 # ── Flujo de envío ─────────────────────────────────────────────────────────────
 
-def notify_consult_profiles(dry_run: bool = False, resultados: list | None = None) -> None:
-    """Registra los perfiles 'consult' nuevos con un código y envía (o previsualiza) el correo."""
+def notify_consult_profiles(dry_run: bool = False, resultados: list | None = None) -> bool:
+    """
+    Registra los perfiles 'consult' nuevos con un código y envía (o previsualiza) el correo.
+    Devuelve False si el correo NO salió (el estado no se guarda y el runner deja a esas
+    personas pendientes para la próxima corrida: nadie se pierde en silencio).
+    """
     if resultados is None:
         if not DECISIONS_FILE.exists():
             log.error(f"No se encontró {DECISIONS_FILE}.")
-            return
+            return False
         resultados = json.loads(DECISIONS_FILE.read_text(encoding="utf-8"))
 
     state = load_state()
@@ -373,7 +377,7 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
                  if r.get("decision") == "consult" and memoria.huella_url(r.get("profile_url")) not in ya_consultados]
     if not consultar:
         log.info("No hay perfiles nuevos para consultar.")
-        return
+        return True
 
     deadline = _now() + timedelta(hours=HOURS_TO_REPLY)
     items = []
@@ -406,10 +410,12 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
             html_body = html_body.replace(f"cid:{cid}", Path(ruta).resolve().as_uri())
         PREVIEW_FILE.write_text(html_body, encoding="utf-8")
         log.info(f"DRY-RUN: NO se envió correo. Vista previa con {len(items)} perfiles en {PREVIEW_FILE}")
-        return  # en dry-run no se guarda estado
+        return True  # en dry-run no se guarda estado
 
     if _send(asunto, html_body, texto):
         save_state(state)
+        return True
+    return False
 
 
 def send_test_email() -> None:
@@ -600,16 +606,20 @@ def leer_buzon(state: dict, desde: datetime, cambios_total: list, conectar=None)
                 ok, motivo = False, f"trae {len(comandos)} códigos (máximo {MAX_CODIGOS_POR_CORREO} por correo)"
             if not ok:
                 resumen["rechazados"] += 1
-                resumen["motivos"].append(motivo)
+                resumen["motivos"].append("tope" if motivo.startswith("trae ") else "firma")
                 log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}.")
                 state["mensajes_procesados"].append(mid)
                 continue
             recibido = _recepcion(msg_data)
             if recibido is None:
-                # No se marca como procesado: se reintenta en la próxima revisión
-                resumen["rechazados"] += 1
-                resumen["motivos"].append("no se pudo leer la hora de recepción (se reintentará)")
-                log.warning("⚠ No se pudo leer la hora de recepción de una respuesta; se reintentará.")
+                # Se reintenta en las próximas revisiones; al tercer intento se descarta y se avisa
+                intentos = state.setdefault("reintentos_hora", {})
+                intentos[mid] = intentos.get(mid, 0) + 1
+                if intentos[mid] >= 3:
+                    state["mensajes_procesados"].append(mid)
+                    resumen["rechazados"] += 1
+                    resumen["motivos"].append("hora_ilegible")
+                log.warning(f"⚠ No se pudo leer la hora de recepción de una respuesta (intento {intentos[mid]} de 3).")
                 continue
             cambios = apply_commands(state, comandos, f"correo ({motivo})", recibido)
             for c in cambios:
