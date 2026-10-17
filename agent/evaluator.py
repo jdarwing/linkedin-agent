@@ -200,6 +200,35 @@ def _fallback(perfil: dict, decision: str, score: int, reason: str) -> dict:
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
+# ── Regla D5 (decisión de Darwing): quien DICE ser de ADR o del grupo va a consulta ─────
+
+def _sin_tildes(x: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", x or "") if unicodedata.category(c) != "Mn").lower()
+
+
+def _empresas_d5() -> list:
+    try:
+        cfg = json.loads(Path("config/reglas.json").read_text(encoding="utf-8"))["D5_empresas_propias_y_grupo"]
+        return [(e["nombre"], [e["nombre"]] + e.get("variantes", [])) for e in cfg["empresas"]], set(cfg.get("colaboradores_verificados", []))
+    except Exception as ex:
+        log.warning(f"No se pudo leer config/reglas.json (D5): {ex}")
+        return [], set()
+
+
+def aplicar_regla_d5(resultado: dict, perfil: dict) -> dict:
+    empresas, verificados = _empresas_d5()
+    texto = _sin_tildes(" ".join(str(perfil.get(k) or "") for k in ("cargo", "empresa_actual", "cargo_actual")))
+    for nombre, variantes in empresas:
+        if any(re.search(r"\b" + re.escape(_sin_tildes(v)) + r"\b", texto) for v in variantes):
+            if (perfil.get("profile_url") or "").rstrip("/") in verificados:
+                return resultado
+            resultado["decision"] = "consult"
+            resultado["reason"] = f"Dice ser de {nombre} (sin verificar): confírmalo tú. " + (resultado.get("reason") or "")
+            return resultado
+    return resultado
+
+
 def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
     key = ANTHROPIC_API_KEY if PROVIDER == "anthropic" else OPENAI_API_KEY
     if not key:
@@ -220,7 +249,7 @@ def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
         nombre = perfil.get("nombre", "?")
         log.info(f"[{i}/{len(perfiles)}] Evaluando: {nombre}")
 
-        resultado = evaluate_profile(client, perfil)
+        resultado = aplicar_regla_d5(evaluate_profile(client, perfil), perfil)
         resultados.append(resultado)
 
         emoji = {"accept": "✅", "consult": "🟡", "ignore": "🔴"}.get(resultado["decision"], "❓")
