@@ -9,6 +9,15 @@
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR" || exit 1
 
+# ── Pausa manual (decisión D0, 17-oct-2026) ───────────────────────────────────
+# Si existe el archivo PAUSA en la carpeta del proyecto, la corrida programada no se ejecuta.
+# La revisión horaria del correo (com.linkedin-agent.correo) no pasa por aquí y sigue activa.
+# Para reanudar: borrar el archivo PAUSA.
+if [ -f "$PROJECT_DIR/PAUSA" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Corrida omitida: agente en PAUSA (ver archivo PAUSA)."
+    exit 0
+fi
+
 # ── Pausa aleatoria: 0–60 minutos ─────────────────────────────────────────────
 # Esto distribuye la ejecución aleatoriamente dentro de la ventana 12:30–13:30
 SLEEP_SEC=$(( RANDOM % 3600 ))

@@ -209,6 +209,12 @@ def run_check_replies() -> None:
 if __name__ == "__main__":
     args = sys.argv[1:]
 
+    # Pausa manual (decisiones D0 y revisión de correo, 17-oct-2026): si existe el archivo
+    # PAUSA en la carpeta del proyecto, tampoco se revisa el correo. Para reanudar: borrar PAUSA.
+    if "--solo-correo" in args and (Path(__file__).resolve().parent.parent / "PAUSA").exists():
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Revisión de correo omitida: agente en PAUSA (ver archivo PAUSA).")
+        sys.exit(0)
+
     if "--solo-correo" in args:
         # Revisión horaria: procesa respuestas, confirma por correo y vence plazos.
         # No abre LinkedIn: las aceptaciones se hacen en la corrida programada.
