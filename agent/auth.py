@@ -1,9 +1,11 @@
 """
 auth.py — Autenticación de LinkedIn con Playwright
 ===================================================
-Abre LinkedIn en un Chromium headed, inicia sesión con las
-credenciales del .env y guarda las cookies en data/session.json
-para que el agente principal las reutilice sin volver a loguearse.
+Abre LinkedIn en un Chromium con ventana, Darwing inicia sesión A MANO y
+se guardan las cookies en data/session.json para que el agente las reutilice.
+
+Fase 0 (R9): la contraseña de LinkedIn ya no se guarda en .env ni se escribe sola.
+El correo (LINKEDIN_EMAIL) solo se usa para prellenar el campo de usuario.
 
 Uso:
     python agent/auth.py
@@ -25,12 +27,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+sys.path.insert(0, str(Path(__file__).parent))
+import huella
+
 # ── Configuración ──────────────────────────────────────────────────────────────
 
 load_dotenv()
 
 EMAIL    = os.getenv("LINKEDIN_EMAIL", "")
-PASSWORD = os.getenv("LINKEDIN_PASSWORD", "")
 SESSION_FILE = Path(os.getenv("SESSION_FILE", "data/session.json"))
 
 LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login"
@@ -39,11 +43,8 @@ FEED_URL           = "https://www.linkedin.com/feed/"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def validate_env() -> None:
-    missing = [k for k, v in {"LINKEDIN_EMAIL": EMAIL, "LINKEDIN_PASSWORD": PASSWORD}.items() if not v]
-    if missing:
-        print(f"[ERROR] Faltan variables de entorno: {', '.join(missing)}")
-        print("        Copia .env.example a .env y complétalo.")
-        sys.exit(1)
+    if os.getenv("LINKEDIN_PASSWORD"):
+        print("[aviso] LINKEDIN_PASSWORD sigue en .env y ya no se usa: bórrala de ese archivo.")
 
 
 def human_pause(seconds: float) -> None:
@@ -129,16 +130,7 @@ def login_and_save_session() -> None:
             ],
         )
 
-        context = browser.new_context(
-            viewport={"width": 1366, "height": 768},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="es-PE",
-            timezone_id="America/Lima",
-        )
+        context = browser.new_context(**huella.opciones_contexto(browser))
 
         page = context.new_page()
 
@@ -186,21 +178,14 @@ def login_and_save_session() -> None:
 
         human_pause(1.5)
 
-        # Intentar auto-login con credenciales del .env
+        # Inicio de sesión manual: solo se prellena el usuario; la contraseña la escribe Darwing
         try:
             page.wait_for_selector("#username", timeout=8_000)
-            print("[auth] Formulario encontrado. Completando credenciales...")
-            page.fill("#username", EMAIL)
-            human_pause(0.8)
-            page.fill("#password", PASSWORD)
-            human_pause(0.6)
-            page.click('[type="submit"]')
-            # Esperar resultado
-            human_pause(4.0)
+            if EMAIL:
+                page.fill("#username", EMAIL)
+            print("[auth] Escribe tu contraseña en la ventana y completa la verificación si la pide.")
         except PWTimeout:
-            # El formulario no apareció — pedir login manual
-            print("\n[auth] No se encontró el formulario automáticamente.")
-            print("[auth] Por favor, loguéate manualmente en la ventana del navegador.")
+            print("\n[auth] Loguéate manualmente en la ventana del navegador.")
 
         # Manejar 2FA o verificación adicional
         if "checkpoint" in page.url or "challenge" in page.url or "security" in page.url:
@@ -218,7 +203,7 @@ def login_and_save_session() -> None:
 
         # ── 3. Confirmar y guardar ────────────────────────────────────────────
         if not is_logged_in(page):
-            print("[ERROR] Login fallido. Revisa las credenciales en .env")
+            print("[ERROR] No se detectó la sesión iniciada. Vuelve a correr auth.py.")
             browser.close()
             sys.exit(1)
 
@@ -230,6 +215,7 @@ def _save_cookies(context, browser) -> None:
     """Guarda el estado completo del contexto (cookies + storage) en SESSION_FILE."""
     state = context.storage_state()
     SESSION_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    os.chmod(SESSION_FILE, 0o600)
     print(f"[auth] ✓ Sesión guardada en {SESSION_FILE}")
     print("[auth]   Cierra el navegador cuando quieras (o en 5 segundos automáticamente).\n")
     time.sleep(5)
@@ -261,17 +247,7 @@ def load_session(playwright, headless: bool = True):
         args=["--disable-blink-features=AutomationControlled"],
     )
 
-    context = browser.new_context(
-        storage_state=str(SESSION_FILE),
-        viewport={"width": 1366, "height": 768},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        locale="es-PE",
-        timezone_id="America/Lima",
-    )
+    context = browser.new_context(**huella.opciones_contexto(browser, str(SESSION_FILE)))
 
     return browser, context
 

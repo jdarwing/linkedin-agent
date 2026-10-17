@@ -44,3 +44,10 @@ data/debug_perfil.html
 data/respaldo-*/
 data/fotos/
 data/debug_experiencia.html
+
+# Fase 0: estado local y pausa (no subir)
+PAUSA
+data/memoria.json
+data/alertas.json
+data/respaldo/
+data/*.tmp

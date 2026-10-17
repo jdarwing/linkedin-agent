@@ -10,8 +10,15 @@ Seguridad (hallazgo H9 del Consejo):
     verificación de autenticidad del proveedor (DMARC/DKIM, cabecera Authentication-Results).
   - Cada código es aleatorio, distinto por perfil y de un solo uso; no se reutilizan lotes.
   - Los textos del perfil se escapan en el HTML (nadie puede inyectar botones o texto).
-  - Responder NO acepta en LinkedIn por sí solo: deja el perfil "aprobado"; la aceptación
-    real la hace actions.py, que respeta el candado LINKEDIN_AGENT_LIVE.
+  - Responder NO acepta en LinkedIn: deja el perfil "aprobado" y el agente le devuelve a
+    Darwing la lista con enlaces para que acepte él en la app (D7-A). El agente no hace clic.
+
+Fase 0 (D8-B, R7, R8, R15): el buzón es el Gmail personal de Darwing, así que la lectura es
+  - en modo SOLO LECTURA (no marca como leído, no mueve ni borra nada);
+  - filtrada en el servidor por remitente (NOTIFY_EMAIL) y asunto ("LinkedIn Agent");
+  - la firma se toma solo del primer encabezado Authentication-Results, el de Google;
+  - el plazo se mide con la hora en que Gmail RECIBIÓ la respuesta, no con la fecha que trae;
+  - un correo con más de MAX_CODIGOS_POR_CORREO códigos se rechaza entero.
 
 Estado: data/consult_state.json  (un registro por código, nunca se sobrescriben lotes)
 
@@ -34,6 +41,7 @@ import re
 import secrets
 import smtplib
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -42,6 +50,10 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import load_dotenv
+
+import logconf
+import memoria
+import secretos
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -56,13 +68,16 @@ LOG_FILE       = Path(os.getenv("LOG_FILE", "logs/agent.log"))
 NOTIFY_EMAIL   = os.getenv("NOTIFY_EMAIL", "").strip()          # correo de Darwing (quien decide)
 SMTP_HOST      = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT      = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER      = os.getenv("SMTP_USER", "").strip()             # Gmail del agente (envía y recibe)
-SMTP_PASS      = "".join(os.getenv("SMTP_PASS", "").split())   # quita espacios (incl. no separables) que Google muestra en la clave
+SMTP_USER      = os.getenv("SMTP_USER", "").strip()             # buzón que usa el agente: hoy el Gmail personal de Darwing (D8-B)
+SMTP_PASS      = "".join(secretos.obtener("SMTP_PASS").split())   # quita espacios (incl. no separables) que Google muestra en la clave
 IMAP_HOST      = os.getenv("IMAP_HOST", "imap.gmail.com")
 IMAP_PORT      = int(os.getenv("IMAP_PORT", "993"))
 
 HOURS_TO_REPLY = int(os.getenv("HOURS_TO_REPLY", "48"))         # D4: 48 h (decisión de Darwing, 16-oct)
 REQUIRE_AUTH   = os.getenv("REQUIRE_EMAIL_AUTH", "1") != "0"     # exigir DMARC/DKIM del remitente
+AUTHSERV_ID    = os.getenv("AUTHSERV_ID", "mx.google.com").lower()   # quien firma el primer Authentication-Results
+ASUNTO_CLAVE   = "LinkedIn Agent"                                 # todo correo válido lo lleva en el asunto
+MAX_CODIGOS_POR_CORREO = int(os.getenv("MAX_CODIGOS_POR_CORREO", "25"))
 
 TOKEN_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"               # sin 0/O/1/I/L para evitar confusiones
 TOKEN_LEN      = 8
@@ -71,13 +86,7 @@ CMD_RE         = re.compile(r"\b(ACEPTAR|ACCEPT|IGNORAR|IGNORE)\b", re.I)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler(sys.stdout)],
-)
-log = logging.getLogger("notifier")
+log = logconf.get("notifier")
 
 
 # ── Estado ─────────────────────────────────────────────────────────────────────
@@ -184,6 +193,47 @@ def _puntaje_html(score) -> str:
             f'background:{fondo};color:{color};font-size:13px;font-weight:bold;vertical-align:middle;">{v}/10</span>')
 
 
+_RECOMENDACIONES = {
+    "aceptar":     ("El agente recomienda aceptar", "#15803d", "#dcfce7"),
+    "consultar":   ("El agente no tiene una recomendación clara", "#92400e", "#fef3c7"),
+    "sin_evaluar": ("El agente NO pudo evaluarlo: decide tú con el perfil", "#b91c1c", "#fee2e2"),
+}
+
+
+def _recomendacion_html(rec) -> str:
+    """Muestra la recomendación sin marcar nada de antemano: la respuesta siempre empieza en '?'."""
+    if rec not in _RECOMENDACIONES:
+        return ""
+    texto, color, fondo = _RECOMENDACIONES[rec]
+    return (f'<div style="display:inline-block;font-size:12px;font-weight:bold;margin-top:6px;padding:2px 8px;'
+            f'border-radius:10px;color:{color};background:{fondo};">{texto}</div>')
+
+
+def aprobados_sin_clic(state: dict) -> list:
+    return sorted([i for i in state["items"].values()
+                   if i.get("estado") == "aprobado" and not i.get("ejecutado_en_linkedin")],
+                  key=lambda i: i.get("resuelto", ""))
+
+
+def lista_clic_html(state: dict) -> str:
+    """D7-A: lo aprobado lo acepta Darwing en la app. Lista con enlace al perfil de cada persona."""
+    pend = aprobados_sin_clic(state)
+    if not pend:
+        return ""
+    filas = ""
+    for k, it in enumerate(pend, 1):
+        url = _safe_url(it.get("profile_url"))
+        nombre = html.escape(it.get("nombre") or "")
+        enlace = (f' · <a href="{html.escape(url)}" style="color:#0a66c2;">abrir perfil</a>' if url else "")
+        filas += f'<li style="margin:2px 0;">{k}. {nombre}{enlace}</li>'
+    return f"""
+  <div style="background:#ffffff;border:1px solid #15803d;border-radius:8px;padding:14px 16px;margin:0 0 16px;font-size:14px;">
+    <div style="font-weight:bold;margin-bottom:6px;">👆 Para aceptar tú en LinkedIn ({len(pend)})</div>
+    <div style="color:#52525b;margin-bottom:6px;">Ya los aprobaste. Ábrelos desde la app de LinkedIn (Mi red → Invitaciones) y pulsa Aceptar. El agente no hace clic.</div>
+    <ul style="margin:4px 0 0;padding-left:18px;list-style:none;">{filas}</ul>
+  </div>"""
+
+
 def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | None = None,
                 intro_html: str = "") -> tuple:
     """Devuelve (asunto, html, texto_plano). Un solo correo de respuesta para todo el lote."""
@@ -194,8 +244,8 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
     tokens = [it["token"] for it in items]
 
     href_lote  = _mailto(agent_addr, "DECISIONES LinkedIn Agent", plantilla_respuesta(items))
-    href_todos = _mailto(agent_addr, f"ACEPTAR {' '.join(tokens)}", f"ACEPTAR {' '.join(tokens)}")
-    href_nadie = _mailto(agent_addr, f"IGNORAR {' '.join(tokens)}", f"IGNORAR {' '.join(tokens)}")
+    # R15: ya no hay "Aceptar a todos": cada persona pasa por la mirada de Darwing.
+    href_nadie = _mailto(agent_addr, "IGNORAR · LinkedIn Agent", f"IGNORAR {' '.join(tokens)}")
 
     tarjetas = ""
     for it in items:
@@ -217,6 +267,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
         tags = it.get("trayectoria_tags") or []
         tray_html = (f'<div style="font-size:13px;color:#15803d;margin-top:4px;">🍇 Trayectoria: {html.escape(", ".join(tags[:3]))}</div>'
                      if tags else "")
+        rec_html = _recomendacion_html(it.get("recomendacion"))
         tarjetas += f"""
   <div style="border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 10px;background:#ffffff;">
    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
@@ -225,6 +276,7 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
     <div style="font-size:16px;font-weight:bold;color:#18181b;"><span style="color:#0a66c2;">{it.get('numero', '')}.</span> {nombre} {_puntaje_html(it.get("score"))}</div>
     <div style="font-size:14px;color:#3f3f46;margin:2px 0 2px;">{rol}</div>{titular_html}
     <div style="font-size:13px;color:#71717a;margin-top:4px;">🤝 {comunes} en común{extra}{ver}</div>
+    {rec_html}
     <div style="font-size:13px;color:#52525b;margin-top:8px;"><b>Por qué te lo consulto:</b> {razon}</div>
     {tray_html}
     <div style="font-size:11px;color:#a1a1aa;margin-top:6px;">Código {it["token"]}</div>
@@ -235,7 +287,6 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
   <div style="background:#ffffff;border:1px solid #e4e4e7;border-radius:8px;padding:14px 16px;margin:0 0 16px;">
     {_boton(href_lote, "📝 Decidir todo en un solo correo", "#0a66c2")}
     <div style="font-size:13px;color:#52525b;margin:6px 0 10px;">Se abre un correo con la lista: cambia cada <b>?</b> por <b>A</b> (aceptar) o <b>I</b> (ignorar) y envíalo una sola vez.</div>
-    {_boton(href_todos, f"✅ Aceptar a {'los ' + str(n) if n > 1 else 'este'}", "#15803d")}
     {_boton(href_nadie, f"❌ Ignorar a {'los ' + str(n) if n > 1 else 'este'}", "#f4f4f5", "#3f3f46")}
   </div>"""
 
@@ -257,9 +308,11 @@ def build_email(items: list, agent_addr: str, deadline: datetime, titulo: str | 
 </div></body></html>"""
 
     texto = [titulo, f"Plazo: {plazo} (hora Lima). Sin respuesta = se ignoran.", "",
+             "Recomendación del agente en cada caso; nada viene marcado: decides tú.", "",
              "Responde con una línea por persona: A <código> para aceptar, I <código> para ignorar.", ""]
     for it in items:
         texto += [f"{it.get('numero', '')}. {it.get('nombre')} ({it.get('score', '?')}/10) | {_linea_rol(it)} | {it.get('conexiones_comun', 0)} en común",
+                  f"   {_RECOMENDACIONES.get(it.get('recomendacion'), ('',))[0]}",
                   f"   Por qué: {it.get('reason')}", f"   Código: {it['token']}", ""]
     return asunto, html_body, "\n".join(texto)
 
@@ -313,9 +366,9 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
     state = load_state()
     # No volver a consultar a alguien ya consultado (pendiente, aprobado, ignorado o vencido):
     # los ignorados siguen pendientes en LinkedIn y reaparecen en cada corrida.
-    ya_consultados = {v.get("profile_url") for v in state["items"].values()}
+    ya_consultados = {memoria.huella_url(v.get("profile_url")) for v in state["items"].values() if v.get("profile_url")}
     consultar = [r for r in resultados
-                 if r.get("decision") == "consult" and r.get("profile_url") not in ya_consultados]
+                 if r.get("decision") == "consult" and memoria.huella_url(r.get("profile_url")) not in ya_consultados]
     if not consultar:
         log.info("No hay perfiles nuevos para consultar.")
         return
@@ -335,13 +388,15 @@ def notify_consult_profiles(dry_run: bool = False, resultados: list | None = Non
                                 + ((r.get("señales") or {}).get("sector") or (r.get("señales") or {}).get("sector_palabras") or []),
             "conexiones_comun": r.get("conexiones_comun"), "profile_url": r.get("profile_url"),
             "score": r.get("score"), "reason": r.get("reason"),
+            "recomendacion": r.get("recomendacion", ""),
             "creado": _now().isoformat(), "plazo": deadline.isoformat(),
             "estado": "pendiente", "ejecutado_en_linkedin": False,
         }
         items.append(item)
         state["items"][tok] = item
 
-    asunto, html_body, texto = build_email(items, SMTP_USER or "agente@ejemplo.com", deadline)
+    asunto, html_body, texto = build_email(items, SMTP_USER or "agente@ejemplo.com", deadline,
+                                           intro_html=lista_clic_html(state))
 
     if dry_run:
         PREVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -381,18 +436,27 @@ def _decode(value: str) -> str:
 
 
 def _sender_ok(msg) -> tuple:
-    """El remitente debe ser NOTIFY_EMAIL y, si REQUIRE_AUTH, pasar DMARC (o DKIM alineado)."""
+    """
+    El remitente debe ser NOTIFY_EMAIL y, si REQUIRE_AUTH, pasar DMARC (o DKIM alineado).
+    R8: solo cuenta el PRIMER encabezado Authentication-Results, que es el que agrega Google
+    (AUTHSERV_ID) al recibir. Los que vienen más abajo los pudo escribir cualquiera.
+    """
     _, addr = email.utils.parseaddr(_decode(msg.get("From", "")))
     addr = addr.lower()
     if not NOTIFY_EMAIL or addr != NOTIFY_EMAIL.lower():
         return False, f"remitente no autorizado ({addr or 'vacío'})"
     if not REQUIRE_AUTH:
         return True, "remitente ok (sin verificación de firma)"
-    dominio = addr.split("@")[-1]
-    auth = " ".join(_decode(h) for h in (msg.get_all("Authentication-Results") or [])).lower()
-    if "dmarc=pass" in auth:
+    dominio = re.escape(addr.split("@")[-1])
+    todos = msg.get_all("Authentication-Results") or []
+    if not todos:
+        return False, "sin encabezado de autenticación"
+    auth = " ".join(_decode(todos[0]).split()).lower()
+    if not re.match(re.escape(AUTHSERV_ID) + r"\s*;", auth):
+        return False, f"el primer encabezado de autenticación no es de {AUTHSERV_ID}"
+    if re.search(r"\bdmarc=pass\b[^;]*\bheader\.from=" + dominio + r"(?![\w.-])", auth):
         return True, "dmarc=pass"
-    if re.search(r"dkim=pass[^;]*header\.(?:i|d)=@?(?:[\w.-]+\.)?" + re.escape(dominio), auth):
+    if re.search(r"\bdkim=pass\b[^;]*\bheader\.(?:i|d)=@?" + dominio + r"(?![\w.-])", auth):
         return True, "dkim=pass alineado"
     return False, "sin firma DMARC/DKIM válida del remitente"
 
@@ -449,10 +513,10 @@ def parse_commands(texto: str) -> dict:
     return result
 
 
-def apply_commands(state: dict, comandos: dict, fuente: str, enviado: datetime | None = None) -> list:
-    """Aplica órdenes a códigos pendientes. El plazo se mide con la hora en que Darwing ENVIÓ la respuesta."""
+def apply_commands(state: dict, comandos: dict, fuente: str, recibido: datetime | None = None) -> list:
+    """Aplica órdenes a códigos pendientes. `recibido` es la hora en que Gmail RECIBIÓ la respuesta (R15)."""
     cambios = []
-    enviado = enviado or _now()
+    recibido = recibido or _now()
     for tok, decision in comandos.items():
         item = state["items"].get(tok)
         if tok.startswith("PRUE-"):
@@ -464,7 +528,7 @@ def apply_commands(state: dict, comandos: dict, fuente: str, enviado: datetime |
         if item["estado"] != "pendiente":
             log.info(f"Código {tok} ya resuelto ({item['estado']}) — sin cambios (un solo uso).")
             continue
-        if enviado > datetime.fromisoformat(item["plazo"]):
+        if recibido > datetime.fromisoformat(item["plazo"]):
             log.info(f"Código {tok} llegó fuera de plazo — se mantiene la regla de vencimiento.")
             continue
         item["estado"] = "aprobado" if decision == "accept" else "ignorado"
@@ -485,10 +549,68 @@ def expire_pending(state: dict) -> list:
     return vencidos
 
 
+def _recepcion(cabecera_fetch: bytes) -> datetime | None:
+    """Hora de recepción en Gmail (INTERNALDATE), en UTC."""
+    tt = imaplib.Internaldate2tuple(cabecera_fetch or b"")
+    return datetime.fromtimestamp(time.mktime(tt), tz=timezone.utc) if tt else None
+
+
+def leer_buzon(state: dict, desde: datetime, cambios_total: list, conectar=None) -> dict:
+    """
+    Lee el buzón en SOLO LECTURA y aplica las órdenes válidas. `conectar` permite usar un
+    buzón de prueba. Devuelve un pequeño resumen para el log y las pruebas.
+    """
+    conectar = conectar or (lambda: imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT))
+    resumen = {"revisados": 0, "con_ordenes": 0, "rechazados": 0}
+    with conectar() as mail:
+        mail.login(SMTP_USER, SMTP_PASS)
+        mail.select("INBOX", readonly=True)          # R7: no marca como leído ni mueve nada
+        criterio = f'(FROM "{NOTIFY_EMAIL}" SUBJECT "{ASUNTO_CLAVE}" SINCE {(desde - timedelta(days=1)).strftime("%d-%b-%Y")})'
+        _, data = mail.search(None, criterio)
+        for num in (data[0] or b"").split():
+            resumen["revisados"] += 1
+            _, msg_data = mail.fetch(num, "(INTERNALDATE BODY.PEEK[])")
+            partes = [x for x in msg_data if isinstance(x, tuple)]
+            if not partes:
+                continue
+            msg = email.message_from_bytes(partes[0][1])
+            mid = msg.get("Message-ID") or f"sin-id-{num.decode()}"
+            if mid in state["mensajes_procesados"]:
+                continue
+            if ASUNTO_CLAVE.lower() not in _decode(msg.get("Subject", "")).lower():
+                continue                              # doble filtro: el servidor ya lo aplicó
+            comandos = parse_commands(_texto_propio(msg))
+            if not comandos:
+                continue
+            resumen["con_ordenes"] += 1
+            ok, motivo = _sender_ok(msg)
+            if ok and len(comandos) > MAX_CODIGOS_POR_CORREO:
+                ok, motivo = False, f"trae {len(comandos)} códigos (máximo {MAX_CODIGOS_POR_CORREO} por correo)"
+            if not ok:
+                resumen["rechazados"] += 1
+                log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}.")
+                state["mensajes_procesados"].append(mid)
+                continue
+            recibido = _recepcion(partes[0][0])
+            if recibido is None:
+                resumen["rechazados"] += 1
+                log.warning("⛔ Correo con órdenes RECHAZADO: no se pudo leer la hora de recepción.")
+                state["mensajes_procesados"].append(mid)
+                continue
+            cambios = apply_commands(state, comandos, f"correo ({motivo})", recibido)
+            for c in cambios:
+                log.info(f"  {logconf.ref(c)} → {c['estado'].upper()} (código {c['token']})")
+            cambios_total.extend(cambios)
+            state["mensajes_procesados"].append(mid)
+    log.info(f"Buzón: {resumen['revisados']} correos del remitente con el asunto del agente, "
+             f"{resumen['con_ordenes']} con órdenes, {resumen['rechazados']} rechazados. Nada se modificó en el buzón.")
+    return resumen
+
+
 def check_replies(dry_run: bool = False) -> list:
     """
     Lee el buzón del agente, aplica solo órdenes válidas de NOTIFY_EMAIL y vence lo que pasó de plazo.
-    Devuelve los perfiles APROBADOS y aún no ejecutados en LinkedIn (para actions.py).
+    Devuelve los perfiles APROBADOS que Darwing aún no acepta en la app (para el resumen).
     """
     state = load_state()
     cambios_total = []
@@ -503,81 +625,36 @@ def check_replies(dry_run: bool = False) -> list:
     else:
         desde = min(fechas)
         try:
-            with imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) as mail:
-                mail.login(SMTP_USER, SMTP_PASS)
-                mail.select("INBOX")   # lectura y escritura: para mover a la papelera las respuestas ya procesadas
-                _, data = mail.search(None, f'(SINCE {(desde - timedelta(days=1)).strftime("%d-%b-%Y")})')
-                ids = data[0].split()
-                revisados = con_ordenes = 0
-                a_papelera = []
-                for num in ids:
-                    revisados += 1
-                    _, msg_data = mail.fetch(num, "(RFC822)")
-                    msg = email.message_from_bytes(msg_data[0][1])
-                    mid = msg.get("Message-ID", f"sin-id-{num.decode()}")
-                    if mid in state["mensajes_procesados"]:
-                        continue
-                    comandos = parse_commands(_texto_propio(msg))
-                    if not comandos:
-                        continue
-                    con_ordenes += 1
-                    ok, motivo = _sender_ok(msg)
-                    if not ok:
-                        log.warning(f"⛔ Correo con órdenes RECHAZADO: {motivo}. Asunto: {_decode(msg.get('Subject',''))[:80]}")
-                        state["mensajes_procesados"].append(mid)
-                        continue
-                    try:
-                        enviado = email.utils.parsedate_to_datetime(msg.get("Date"))
-                        if enviado.tzinfo is None:
-                            enviado = enviado.replace(tzinfo=timezone.utc)
-                    except Exception:
-                        enviado = _now()
-                    cambios = apply_commands(state, comandos, f"correo ({motivo})", enviado)
-                    for c in cambios:
-                        log.info(f"  {c['nombre']} → {c['estado'].upper()} (código {c['token']})")
-                    cambios_total.extend(cambios)
-                    state["mensajes_procesados"].append(mid)
-                    a_papelera.append(num)
-                # Mover a la papelera las respuestas válidas ya procesadas (recuperables 30 días en Gmail)
-                if a_papelera and not dry_run:
-                    for num in a_papelera:
-                        if "gmail" in IMAP_HOST:
-                            mail.store(num, "+X-GM-LABELS", "\\Trash")
-                        else:
-                            mail.store(num, "+FLAGS", "\\Deleted")
-                    if "gmail" not in IMAP_HOST:
-                        mail.expunge()
-                    log.info(f"🗑 {len(a_papelera)} respuestas procesadas movidas a la papelera de {SMTP_USER}.")
-            log.info(f"Buzón {SMTP_USER}: {revisados} correos revisados, {con_ordenes} con órdenes de aprobación.")
+            leer_buzon(state, desde, cambios_total)
         except Exception as e:
-            log.error(f"Error leyendo el buzón: {e}")
+            log.error(f"Error leyendo el buzón: {type(e).__name__}: {str(e)[:120]}")
 
     vencidos = expire_pending(state)
     for v in vencidos:
-        log.info(f"  {v['nombre']} → sin respuesta en {HOURS_TO_REPLY} h: se ignora")
+        log.info(f"  {logconf.ref(v)} → sin respuesta en {HOURS_TO_REPLY} h: se ignora")
 
     # Registrar en el historial las decisiones finales que no requieren LinkedIn
     fecha = _now().strftime("%Y-%m-%d %H:%M")
     filas = [{"fecha": fecha, "nombre": i["nombre"], "cargo": i["cargo"],
               "conexiones_comun": i["conexiones_comun"], "profile_url": i["profile_url"],
-              "decision": "ignore", "score": i.get("score", ""), "reason": i.get("reason", ""),
-              "fuente": i["fuente"]}
+              "decision": "accept" if i["estado"] == "aprobado" else "ignore",
+              "score": i.get("score", ""), "reason": i.get("reason", ""),
+              "fuente": ("darwing_" if i["estado"] != "vencido" else "") + i["fuente"]}
              for i in state["items"].values()
-             if i["estado"] in ("ignorado", "vencido") and not i.get("registrado")]
+             if i["estado"] in ("aprobado", "ignorado", "vencido") and not i.get("registrado")]
 
     if dry_run:
         log.info(f"DRY-RUN: estado de consultas no modificado ({len(filas)} decisiones se registrarían).")
     else:
         append_to_csv(filas)
         for i in state["items"].values():
-            if i["estado"] in ("ignorado", "vencido"):
+            if i["estado"] in ("aprobado", "ignorado", "vencido"):
                 i["registrado"] = True
         save_state(state)
         if cambios_total:
             send_confirmation(state, cambios_total)
 
-    return [dict(i, decision="accept") for i in state["items"].values()
-            if i["estado"] == "aprobado" and not i.get("ejecutado_en_linkedin")]
+    return aprobados_sin_clic(state)
 
 
 def send_confirmation(state: dict, cambios: list) -> None:
@@ -594,9 +671,7 @@ def send_confirmation(state: dict, cambios: list) -> None:
     <div style="font-weight:bold;margin-bottom:6px;">Recibí tu respuesta ✓</div>
     <div>✅ Aprobados ({len(aprob)}):</div><ul style="margin:4px 0 8px;">{lista(aprob)}</ul>
     <div>❌ Ignorados ({len(ign)}):</div><ul style="margin:4px 0 8px;">{lista(ign)}</ul>
-    <div style="color:#52525b;">Los aprobados se aceptarán en LinkedIn en la próxima corrida del agente
-    (mientras el candado esté puesto, quedan en espera).</div>
-  </div>"""
+  </div>""" + lista_clic_html(state)
     if pend:
         plazo = min(datetime.fromisoformat(i["plazo"]) for i in pend)
         asunto, html_body, texto = build_email(
@@ -609,17 +684,26 @@ def send_confirmation(state: dict, cambios: list) -> None:
     _send(asunto, html_body, texto)
 
 
-def mark_executed(profile_urls: list) -> None:
-    """Marca como aceptados en LinkedIn los aprobados que actions.py realmente pulsó."""
-    if not profile_urls:
-        return
+def cerrar_aprobados_ausentes(urls_visibles: list, cobertura_completa: bool) -> int:
+    """
+    Si Darwing ya aceptó en la app, la invitación desaparece de "Recibidas". Solo cuando la
+    lectura vio TODAS las invitaciones se marcan como hechas las aprobadas que ya no están.
+    """
+    if not cobertura_completa:
+        return 0
+    visibles = {memoria.norm(u) for u in urls_visibles}
     state = load_state()
-    urls = set(profile_urls)
+    n = 0
     for i in state["items"].values():
-        if i["estado"] == "aprobado" and i.get("profile_url") in urls:
+        if (i.get("estado") == "aprobado" and not i.get("ejecutado_en_linkedin")
+                and memoria.norm(i.get("profile_url")) not in visibles):
             i["ejecutado_en_linkedin"] = True
             i["ejecutado"] = _now().isoformat()
-    save_state(state)
+            i["ejecutado_por"] = "darwing_en_la_app"
+            n += 1
+    if n:
+        save_state(state)
+    return n
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

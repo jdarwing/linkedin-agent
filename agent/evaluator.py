@@ -1,8 +1,14 @@
 """
 evaluator.py — Evaluación de perfiles con Claude API
 =====================================================
-Lee data/pending_requests.json, llama a la API de Anthropic
-por cada perfil y devuelve la decisión: accept / consult / ignore.
+Lee data/pending_requests.json, llama al modelo por cada perfil y devuelve
+su lectura: accept / consult / ignore, o "error" si no pudo evaluar.
+
+Fase 0:
+  - R14: un error de la API o una respuesta ilegible es "error". Ninguna regla lo sube
+    y el perfil va a Darwing sin recomendación; la corrida se marca DEGRADADA.
+  - R16: si falta config/reglas.json o está incompleto, la corrida se detiene (falla cerrada).
+  - El resultado del modelo y de las reglas es solo una RECOMENDACIÓN: el agente ya no acepta.
 
 Uso:
     python agent/evaluator.py              # evalúa y guarda en data/decisions_preview.json
@@ -19,6 +25,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import logconf
+import secretos
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 load_dotenv()
@@ -33,8 +42,9 @@ def _real_key(v: str) -> str:
     v = (v or "").strip()
     return "" if (not v or v.endswith("...") or "aqui" in v) else v
 
-ANTHROPIC_API_KEY = _real_key(os.getenv("ANTHROPIC_API_KEY", ""))
-OPENAI_API_KEY    = _real_key(os.getenv("OPENAI_API_KEY", ""))
+ANTHROPIC_API_KEY = _real_key(secretos.obtener("ANTHROPIC_API_KEY"))
+OPENAI_API_KEY    = _real_key(secretos.obtener("OPENAI_API_KEY"))
+REGLAS_FILE       = Path(os.getenv("REGLAS_FILE", "config/reglas.json"))
 # Proveedor: Claude por defecto si hay clave de Anthropic; OpenAI como respaldo.
 PROVIDER = (os.getenv("EVAL_PROVIDER") or ("anthropic" if ANTHROPIC_API_KEY else "openai")).lower()
 MODEL    = os.getenv("EVAL_MODEL") or ("claude-sonnet-5-5" if PROVIDER == "anthropic" else "gpt-4o")
@@ -43,16 +53,7 @@ PAUSE_BETWEEN     = 1.0   # segundos entre llamadas (rate limit)
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-log = logging.getLogger("evaluator")
+log = logconf.get("evaluator")
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
@@ -157,7 +158,7 @@ def evaluate_profile(client, perfil: dict) -> dict:
         decision = resultado.get("decision", "consult").lower()
         if decision not in {"accept", "consult", "ignore"}:
             decision = "consult"
-        score  = int(resultado.get("score", 5))
+        score  = int(resultado.get("score", 5))   # un puntaje no numérico cuenta como respuesta ilegible
         reason = resultado.get("reason", "Sin razón")
 
         return {
@@ -175,12 +176,12 @@ def evaluate_profile(client, perfil: dict) -> dict:
             "raw_response": raw,
         }
 
-    except json.JSONDecodeError as e:
-        log.warning(f"JSON inválido para {perfil.get('nombre')}: {e} | raw: {raw[:200]}")
-        return _fallback(perfil, "consult", 5, f"Error parsing JSON: {e}")
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as e:
+        log.warning(f"Respuesta ilegible del modelo para {logconf.ref(perfil)}: {type(e).__name__}")
+        return _fallback(perfil, "error", None, "El agente no pudo evaluar este perfil (respuesta ilegible del modelo).")
     except Exception as e:
-        log.error(f"Error evaluando {perfil.get('nombre')}: {e}")
-        return _fallback(perfil, "consult", 5, f"Error API: {e}")
+        log.error(f"Error de la API evaluando {logconf.ref(perfil)}: {type(e).__name__}: {str(e)[:120]}")
+        return _fallback(perfil, "error", None, "El agente no pudo evaluar este perfil (error de la API).")
 
 
 def _fallback(perfil: dict, decision: str, score: int, reason: str) -> dict:
@@ -209,21 +210,28 @@ def _sin_tildes(x: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", x or "") if unicodedata.category(c) != "Mn").lower()
 
 
-def _empresas_d5() -> list:
-    try:
-        cfg = json.loads(Path("config/reglas.json").read_text(encoding="utf-8"))["D5_empresas_propias_y_grupo"]
-        return [(e["nombre"], [e["nombre"]] + e.get("variantes", [])) for e in cfg["empresas"]], set(cfg.get("colaboradores_verificados", []))
-    except Exception as ex:
-        log.warning(f"No se pudo leer config/reglas.json (D5): {ex}")
-        return [], set()
+class ReglasError(Exception):
+    """config/reglas.json falta, no se puede leer o le faltan secciones: la corrida no sigue."""
 
 
-def _reglas() -> dict:
+SECCIONES_OBLIGATORIAS = ("D5_empresas_propias_y_grupo", "trayectoria")
+
+
+def cargar_reglas(ruta: Path | None = None) -> dict:
+    """Falla cerrada (R16): sin reglas válidas no se evalúa a nadie."""
+    ruta = Path(ruta or REGLAS_FILE)
     try:
-        return json.loads(Path("config/reglas.json").read_text(encoding="utf-8"))
+        cfg = json.loads(ruta.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ReglasError(f"No existe {ruta}")
     except Exception as ex:
-        log.warning(f"No se pudo leer config/reglas.json: {ex}")
-        return {}
+        raise ReglasError(f"No se pudo leer {ruta}: {type(ex).__name__}")
+    faltan = [k for k in SECCIONES_OBLIGATORIAS if not isinstance(cfg.get(k), dict)]
+    if faltan:
+        raise ReglasError(f"A {ruta} le faltan secciones: {', '.join(faltan)}")
+    if not cfg["D5_empresas_propias_y_grupo"].get("empresas"):
+        raise ReglasError(f"{ruta} no trae la lista de empresas del grupo (D5)")
+    return cfg
 
 
 def _coinciden(texto: str, terminos: list) -> list:
@@ -254,13 +262,15 @@ def señales_trayectoria(perfil: dict, cfg: dict) -> dict:
     }
 
 
-def aplicar_reglas(resultado: dict, perfil: dict) -> dict:
+def aplicar_reglas(resultado: dict, perfil: dict, cfg: dict | None = None) -> dict:
     """
     Reglas deterministas de Darwing sobre la evaluación del modelo:
       D5 + trayectoria (17-oct): grupo Frutura/ADR → aceptar con >=10 contactos en común; si no, consultar con marca.
       Sector (empresas o vocabulario del sector) → +10 en común: aceptar; nunca ignorar (pasa a consultar).
     """
-    cfg = _reglas()
+    if resultado.get("decision") == "error":
+        return resultado                    # R14: un error es error; ninguna regla lo sube
+    cfg = cfg if cfg is not None else cargar_reglas()
     verificados = {u.rstrip("/") for u in cfg.get("D5_empresas_propias_y_grupo", {}).get("colaboradores_verificados", [])}
     minimo = int(cfg.get("trayectoria", {}).get("min_contactos_comun", 10))
     try:
@@ -297,10 +307,27 @@ def aplicar_reglas(resultado: dict, perfil: dict) -> dict:
     return resultado
 
 
-def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
+RECOMENDACION = {"accept": "aceptar", "consult": "consultar", "ignore": "ignorar", "error": "sin_evaluar"}
+
+
+def a_recomendacion(resultado: dict) -> dict:
+    """
+    R3 (Fase 0): el agente ya no acepta por su cuenta. Lo que antes era "accept" pasa a
+    consulta con la recomendación "aceptar"; un error pasa a consulta sin recomendación.
+    "ignore" sigue siendo solo un registro local: no toca LinkedIn ni avisa a la persona.
+    """
+    lectura = resultado.get("decision")
+    resultado["lectura_agente"] = lectura
+    resultado["recomendacion"] = RECOMENDACION.get(lectura, "sin_evaluar")
+    resultado["decision"] = "ignore" if lectura == "ignore" else "consult"
+    return resultado
+
+
+def evaluate_all(dry_run: bool = False, perfiles: list | None = None, client=None) -> list:
+    cfg = cargar_reglas()                   # R16: antes de cualquier llamada; si falla, no se evalúa a nadie
     key = ANTHROPIC_API_KEY if PROVIDER == "anthropic" else OPENAI_API_KEY
-    if not key:
-        log.error("Falta una clave real en .env: ANTHROPIC_API_KEY (Claude) u OPENAI_API_KEY.")
+    if client is None and not key:
+        log.error("Falta una clave real: ANTHROPIC_API_KEY (Claude) u OPENAI_API_KEY (llavero o .env).")
         sys.exit(1)
 
     if perfiles is None:
@@ -310,51 +337,38 @@ def evaluate_all(dry_run: bool = False, perfiles: list | None = None) -> list:
         perfiles = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     log.info(f"Evaluando {len(perfiles)} perfiles con {PROVIDER} ({MODEL})...")
 
-    client = make_client()
+    client = client or make_client()
+    version = cfg.get("_version", "")
     resultados = []
 
     for i, perfil in enumerate(perfiles, 1):
-        nombre = perfil.get("nombre", "?")
-        log.info(f"[{i}/{len(perfiles)}] Evaluando: {nombre}")
-
-        resultado = aplicar_reglas(evaluate_profile(client, perfil), perfil)
+        resultado = a_recomendacion(aplicar_reglas(evaluate_profile(client, perfil), perfil, cfg))
+        resultado["version_reglas"] = version
         for k in ("foto", "conexiones_comun"):
             if perfil.get(k) is not None:
                 resultado[k] = perfil.get(k)
         resultados.append(resultado)
 
-        emoji = {"accept": "✅", "consult": "🟡", "ignore": "🔴"}.get(resultado["decision"], "❓")
-        log.info(
-            f"  {emoji} {resultado['decision'].upper()} (score {resultado['score']}) — "
-            f"{resultado['reason'][:80]}"
-        )
+        log.info(f"[{i}/{len(perfiles)}] {logconf.ref(perfil)}: recomendación {resultado['recomendacion']} (score {resultado['score']})")
 
         if i < len(perfiles):
             time.sleep(PAUSE_BETWEEN)
 
     # ── Resumen ───────────────────────────────────────────────────────────────
-    acepta   = [r for r in resultados if r["decision"] == "accept"]
-    consulta = [r for r in resultados if r["decision"] == "consult"]
-    ignora   = [r for r in resultados if r["decision"] == "ignore"]
+    acepta   = [r for r in resultados if r["lectura_agente"] == "accept"]
+    consulta = [r for r in resultados if r["lectura_agente"] == "consult"]
+    ignora   = [r for r in resultados if r["lectura_agente"] == "ignore"]
+    errores  = [r for r in resultados if r["lectura_agente"] == "error"]
 
-    log.info(f"\n── RESUMEN ──────────────────────────────────────────────────")
-    log.info(f"  ✅ Aceptar:   {len(acepta)}")
-    log.info(f"  🟡 Consultar: {len(consulta)}")
-    log.info(f"  🔴 Ignorar:   {len(ignora)}")
+    log.info(f"Lectura del modelo + reglas: {len(acepta)} recomendaría aceptar | {len(consulta)} consultar | "
+             f"{len(ignora)} ignorar | {len(errores)} con error")
 
     if dry_run:
-        # Archivo aparte: nunca lo lee actions.py en modo real
+        # Para que Darwing revise el dry-run. Es temporal: se borra al inicio de la próxima corrida (D11-A).
         DRYRUN_DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         DRYRUN_DECISIONS_FILE.write_text(
             json.dumps(resultados, indent=2, ensure_ascii=False), encoding="utf-8")
-        log.info(f"✓ DRY-RUN: decisiones guardadas para revisión en {DRYRUN_DECISIONS_FILE}")
-    else:
-        DECISIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        DECISIONS_FILE.write_text(
-            json.dumps(resultados, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        log.info(f"✓ Decisiones guardadas en {DECISIONS_FILE}")
+        log.info(f"✓ DRY-RUN: recomendaciones guardadas para revisión en {DRYRUN_DECISIONS_FILE}")
 
     return resultados
 

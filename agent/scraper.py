@@ -4,6 +4,13 @@ scraper.py — Extracción de solicitudes de conexión pendientes
 Usa JavaScript para extraer datos de los cards de invitación,
 resistente a cambios de clases CSS dinámicas de LinkedIn/React.
 
+Fase 0:
+  - D10-A: una sola visita por persona (solo la página del perfil; la trayectoria se lee de
+    su sección Experiencia) y nunca se vuelve a visitar a quien ya está en la memoria.
+  - Guardián: ante verificación, captcha, aviso o sesión caída se lanza AlertaCuenta y el
+    agente se pausa. R6: user agent real de la Mac.
+  - DIAGNOSTICO: deja constancia de la cobertura para el aviso DEGRADADA.
+
 Uso:
     python agent/scraper.py              # extrae y guarda en data/pending_requests.json
     python agent/scraper.py --dry-run   # imprime sin guardar
@@ -22,6 +29,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+import guardian
+import huella
+import logconf
+import memoria
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 load_dotenv()
@@ -35,7 +47,8 @@ MAX_PER_RUN     = int(os.getenv("MAX_PER_RUN", "30"))
 DEBUG_HTML_FILE = Path(os.getenv("DEBUG_HTML_FILE", "data/debug_invitations.html"))
 DEBUG_PERFIL_FILE = Path(os.getenv("DEBUG_PERFIL_FILE", "data/debug_perfil.html"))
 ENRIQUECER      = os.getenv("ENRIQUECER_PERFILES", "1") != "0"   # visitar cada perfil nuevo para leer cargo y empresa actuales
-LEER_TRAYECTORIA = os.getenv("LEER_TRAYECTORIA", "1") != "0"     # visitar también la página de experiencia completa
+LEER_TRAYECTORIA = os.getenv("LEER_TRAYECTORIA", "0") == "1"     # D10-A: apagado; sería una segunda visita por persona
+GUARDAR_DEBUG   = os.getenv("DEBUG_HTML", "0") == "1"              # D11-A: páginas de diagnóstico solo si se piden
 FOTOS_DIR       = Path(os.getenv("FOTOS_DIR", "data/fotos"))
 DEBUG_EXP_FILE  = Path(os.getenv("DEBUG_EXP_FILE", "data/debug_experiencia.html"))
 STATE_FILE      = Path(os.getenv("CONSULT_STATE_FILE", "data/consult_state.json"))
@@ -43,16 +56,10 @@ DECISIONS_CSV   = Path(os.getenv("DECISIONS_CSV", "data/decisions.csv"))
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-log = logging.getLogger("scraper")
+log = logconf.get("scraper")
+
+# Resultado de la última lectura, para el aviso DEGRADADA y para cerrar aprobados ya aceptados
+DIAGNOSTICO: dict = {}
 
 
 def human_pause(base: float = 1.5) -> None:
@@ -290,21 +297,12 @@ def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> int:
 # ── Perfiles ya conocidos (para leer solo solicitudes NUEVAS) ─────────────────
 
 def perfiles_conocidos() -> set:
-    """URLs ya consultadas o ya decididas en corridas anteriores."""
-    urls = set()
+    """Huellas de las URLs ya vistas: memoria completa, consultas y CSV (D10-A)."""
     try:
-        if STATE_FILE.exists():
-            urls |= {v.get("profile_url") for v in json.loads(STATE_FILE.read_text(encoding="utf-8"))["items"].values()}
+        return memoria.conocidos()
     except Exception as e:
-        log.warning(f"No se pudo leer {STATE_FILE}: {e}")
-    try:
-        if DECISIONS_CSV.exists():
-            import csv
-            with DECISIONS_CSV.open(encoding="utf-8") as f:
-                urls |= {r.get("profile_url") for r in csv.DictReader(f)}
-    except Exception as e:
-        log.warning(f"No se pudo leer {DECISIONS_CSV}: {e}")
-    return {u.rstrip("/") for u in urls if u}
+        log.warning(f"No se pudo leer la memoria: {e}")
+        return set()
 
 
 # ── Enriquecimiento: cargo y empresa actuales desde el perfil ──────────────────
@@ -322,7 +320,7 @@ JS_PERFIL = """
     return out;
   };
   const res = {titular: '', empresa_cabecera: '', ubicacion: '', acerca_de: '',
-               experiencia_lineas: [], tiene_foto: false};
+               experiencia_lineas: [], experiencia_todas: [], tiene_foto: false};
   const main = document.querySelector('main') || document.body;
   const secciones = Array.from(main.querySelectorAll('section'));
   const titulo = s => { const h = s.querySelector('h2'); return h ? clean(h.innerText) : ''; };
@@ -363,6 +361,10 @@ JS_PERFIL = """
       .filter(t => !/^(Experiencia|Experience|Mostrar|Show|Ver todo|See all|…|más)$/i.test(t))
       .filter((t, i, a) => a.indexOf(t) === i)
       .slice(0, 8);
+    // D10-A: la trayectoria sale de esta misma página (sin visitar /details/experience/)
+    res.experiencia_todas = lines(exp)
+      .filter(t => !/^(Experiencia|Experience|Mostrar|Show|Ver todo|See all|…|más)$/i.test(t))
+      .slice(0, 80);
   }
   return res;
 }
@@ -429,9 +431,9 @@ def leer_trayectoria(page, perfil: dict, dry_run: bool, primero: bool) -> None:
         time.sleep(random.uniform(2.0, 4.0))
         page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         time.sleep(random.uniform(2.5, 4.0))
-        if any(x in page.url for x in ("login", "authwall", "checkpoint", "uas")):
-            log.warning("⚠ LinkedIn pidió verificación en la página de experiencia.")
-            return
+        motivo = guardian.revisar(page.url)
+        if motivo:
+            raise guardian.AlertaCuenta(motivo)
         for _ in range(3):
             page.evaluate("window.scrollBy(0, 1200)")
             time.sleep(random.uniform(0.8, 1.5))
@@ -439,8 +441,10 @@ def leer_trayectoria(page, perfil: dict, dry_run: bool, primero: bool) -> None:
         # quitar encabezados y navegación típicos
         lineas = [l for l in lineas if not re.match(r"^(Experiencia|Experience|Volver|Back|Mostrar|Show|Ver |See )", l)]
         perfil["trayectoria"] = " | ".join(lineas)[:3000]
-        if dry_run and primero:
+        if GUARDAR_DEBUG and primero:
             DEBUG_EXP_FILE.write_text(page.content(), encoding="utf-8")
+    except guardian.AlertaCuenta:
+        raise
     except Exception as e:
         log.warning(f"  No se pudo leer la experiencia de {perfil.get('nombre')}: {e}")
 
@@ -454,9 +458,9 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             time.sleep(random.uniform(2.5, 4.5))
-            if any(x in page.url for x in ("login", "authwall", "checkpoint", "uas")):
-                log.warning("⚠ LinkedIn pidió verificación al visitar perfiles: se detiene el enriquecimiento.")
-                return
+            motivo = guardian.revisar(page.url)
+            if motivo:
+                raise guardian.AlertaCuenta(motivo)
             for _ in range(10):                                 # la sección Experiencia carga al bajar
                 if page.evaluate(JS_HAY_EXPERIENCIA):
                     break
@@ -481,20 +485,24 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
             perfil["tiene_foto"] = datos.get("tiene_foto", False)
             if datos.get("foto_url"):
                 descargar_foto(page, perfil, datos["foto_url"])
+            if datos.get("experiencia_todas"):
+                perfil["trayectoria"] = " | ".join(datos["experiencia_todas"])[:3000]
             if LEER_TRAYECTORIA:
                 leer_trayectoria(page, perfil, dry_run, primero=(k == 1))
-            if dry_run and k == 1:
+            if GUARDAR_DEBUG and k == 1:
                 DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
-                log.info(f"  Diagnóstico cabecera (perfil 1): {datos.get('cabecera')}")
-            log.info(f"  [{k}/{len(perfiles)}] {perfil['nombre']}: "
-                     f"{perfil.get('cargo_actual') or '(cargo: ver titular)'} · {perfil.get('empresa_actual') or '¿empresa?'}"
-                     f"{' · ' + perfil['ubicacion'] if perfil.get('ubicacion') else ''}")
+            log.info(f"  [{k}/{len(perfiles)}] {logconf.ref(perfil)}: "
+                     f"cargo {'sí' if perfil.get('cargo_actual') else 'no'} · empresa {'sí' if perfil.get('empresa_actual') else 'no'} · "
+                     f"trayectoria {'sí' if perfil.get('trayectoria') else 'no'}")
+        except guardian.AlertaCuenta:
+            raise
         except Exception as e:
-            log.warning(f"  No se pudo leer el perfil de {perfil.get('nombre')}: {e}")
+            log.warning(f"  No se pudo leer el perfil {logconf.ref(perfil)}: {type(e).__name__}")
         time.sleep(random.uniform(4.0, 9.0))                    # ritmo humano entre perfiles
     sin_datos = sum(1 for p in perfiles if not (p.get("cargo_actual") or p.get("empresa_actual")))
     if perfiles and sin_datos > len(perfiles) / 2:
-        log.warning(f"⚠ {sin_datos} de {len(perfiles)} perfiles sin cargo actual: revisar selectores (data/debug_perfil.html).")
+        DIAGNOSTICO.setdefault("alertas", []).append(
+            f"{sin_datos} de {len(perfiles)} perfiles nuevos quedaron sin cargo ni empresa: LinkedIn pudo cambiar la página.")
 
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
@@ -525,99 +533,105 @@ def scrape_invitations(dry_run: bool = False) -> list:
 
     log.info("Iniciando extracción de solicitudes pendientes...")
 
+    DIAGNOSTICO.clear()
+    DIAGNOSTICO.update(alertas=[], urls_visibles=[], cobertura_completa=False)
+
     with sync_playwright() as p:
         browser = abrir_navegador(p)
-        context = browser.new_context(
-            storage_state=str(SESSION_FILE),
-            viewport={"width": 1366, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="es-PE",
-            timezone_id="America/Lima",
-        )
+        context = browser.new_context(**huella.opciones_contexto(browser, str(SESSION_FILE)))
         page = context.new_page()
-
-        # ── Navegar a invitaciones ─────────────────────────────────────────────
         try:
-            page.goto(INVITATIONS_URL, wait_until="domcontentloaded", timeout=30_000)
-        except PWTimeout:
-            log.warning("Timeout al cargar — continuando...")
-
-        # Esperar a que aparezca al menos un botón Accept/Aceptar
-        try:
-            page.wait_for_function(
-                """() => {
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    return btns.some(b => {
-                        const t = (b.innerText || '').trim().toLowerCase();
-                        return t === 'aceptar' || t === 'accept';
-                    });
-                }""",
-                timeout=15_000,
-            )
-            log.info("Botones de aceptar detectados en la página.")
-        except PWTimeout:
-            log.warning("No se detectaron botones de aceptar tras 15s.")
-
-        # Verificar sesión
-        if "login" in page.url or "authwall" in page.url or "uas" in page.url:
-            log.error("Sesión expirada. Ejecuta 'python agent/auth.py' para renovarla.")
+            return _leer(page, dry_run)
+        finally:
             browser.close()
-            sys.exit(1)
 
-        log.info(f"URL actual: {page.url}")
-        human_pause(2.0)
 
-        # ── Scroll para cargar todos los cards ────────────────────────────────
-        log.info("Haciendo scroll para cargar todas las invitaciones...")
-        total_declarado = page.evaluate(JS_TOTAL)
-        if total_declarado is not None:
-            log.info(f"LinkedIn declara {total_declarado} invitaciones recibidas.")
-        conocidos = perfiles_conocidos()
-        scroll_and_wait(page, min(MAX_PER_RUN + len(conocidos), 100))
+SIN_INVITACIONES = re.compile(r"no (?:tienes|hay) invitaciones|no pending invitations|no new invitations|"
+                              r"(?:recibidas|received)\s*\(\s*0\s*\)", re.I)
 
-        # ── Extraer datos con JavaScript ──────────────────────────────────────
-        log.info("Extrayendo datos de los cards...")
-        perfiles = page.evaluate(JS_EXTRACT)
 
-        # Chequeo de cobertura: avisar si se extrajo menos de lo esperado
-        if total_declarado:
-            esperado = min(total_declarado, MAX_PER_RUN)
-            if len(perfiles) < esperado:
-                log.warning(f"⚠ COBERTURA INCOMPLETA: {len(perfiles)} extraídos de {esperado} esperados "
-                            f"({total_declarado} declarados, tope {MAX_PER_RUN}).")
-        else:
-            log.warning("⚠ No se pudo leer el total de invitaciones en la página; cobertura no verificable.")
+def _leer(page, dry_run: bool) -> list:
 
-        # En dry-run se guarda el HTML para ajustar selectores (queda local; está en .gitignore)
-        if dry_run:
-            try:
-                DEBUG_HTML_FILE.parent.mkdir(parents=True, exist_ok=True)
-                DEBUG_HTML_FILE.write_text(page.content(), encoding="utf-8")
-                log.info(f"HTML de la página guardado en {DEBUG_HTML_FILE} (solo diagnóstico local).")
-            except Exception as e:
-                log.warning(f"No se pudo guardar el HTML de diagnóstico: {e}")
+    # ── Navegar a invitaciones ─────────────────────────────────────────────
+    try:
+        page.goto(INVITATIONS_URL, wait_until="domcontentloaded", timeout=30_000)
+    except PWTimeout:
+        log.warning("Timeout al cargar — continuando...")
 
-        # Limitar al máximo por sesión
-        total_vistos = len(perfiles)
-        perfiles = [p for p in perfiles if (p.get("profile_url") or "").rstrip("/") not in conocidos][:MAX_PER_RUN]
-        log.info(f"{total_vistos} invitaciones visibles → {len(perfiles)} nuevas (tope {MAX_PER_RUN}).")
+    # Esperar a que aparezca al menos un botón Accept/Aceptar
+    try:
+        page.wait_for_function(
+            """() => {
+                const btns = Array.from(document.querySelectorAll('button'));
+                return btns.some(b => {
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    return t === 'aceptar' || t === 'accept';
+                });
+            }""",
+            timeout=15_000,
+        )
+        log.info("Botones de aceptar detectados en la página.")
+    except PWTimeout:
+        log.warning("No se detectaron botones de aceptar tras 15s.")
 
-        if ENRIQUECER and perfiles:
-            log.info("Leyendo cargo y empresa actuales de cada perfil nuevo...")
-            enriquecer_perfiles(page, perfiles, dry_run=dry_run)
+    # Guardián: verificación, captcha, aviso o sesión caída → pausa total
+    guardian.revisar_pagina(page)
+    human_pause(2.0)
 
-        browser.close()
+    # ── Scroll para cargar todos los cards ────────────────────────────────
+    log.info("Haciendo scroll para cargar todas las invitaciones...")
+    total_declarado = page.evaluate(JS_TOTAL)
+    if total_declarado is not None:
+        log.info(f"LinkedIn declara {total_declarado} invitaciones recibidas.")
+    conocidos = perfiles_conocidos()
+    scroll_and_wait(page, min(MAX_PER_RUN + len(conocidos), 100))
+
+    # ── Extraer datos con JavaScript ──────────────────────────────────────
+    log.info("Extrayendo datos de los cards...")
+    perfiles = page.evaluate(JS_EXTRACT)
+
+    # Chequeo de cobertura: avisar si se extrajo menos de lo esperado
+    DIAGNOSTICO.update(total_declarado=total_declarado, visibles=len(perfiles),
+                       urls_visibles=[x.get("profile_url") for x in perfiles if x.get("profile_url")])
+    if total_declarado:
+        esperado = min(total_declarado, MAX_PER_RUN)
+        DIAGNOSTICO["cobertura_completa"] = len(perfiles) >= total_declarado
+        if len(perfiles) < esperado:
+            DIAGNOSTICO["alertas"].append(f"Cobertura incompleta: se leyeron {len(perfiles)} de {esperado} invitaciones esperadas "
+                                          f"({total_declarado} declaradas por LinkedIn).")
+    else:
+        log.warning("⚠ No se pudo leer el total de invitaciones en la página; cobertura no verificable.")
+        if not perfiles:
+            texto = page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 20000)")
+            if SIN_INVITACIONES.search(texto or ""):
+                DIAGNOSTICO["cobertura_completa"] = True
+            else:
+                DIAGNOSTICO["alertas"].append("No se encontró ninguna invitación y la página tampoco dice que no haya: "
+                                              "LinkedIn pudo cambiar la página.")
+    sin_url = sum(1 for x in perfiles if not x.get("profile_url"))
+    if sin_url:
+        DIAGNOSTICO["alertas"].append(f"{sin_url} invitaciones sin enlace de perfil: no se pueden identificar.")
+
+    # Página de diagnóstico solo si se pide con DEBUG_HTML=1 (D11-A); se borra en la próxima corrida
+    if GUARDAR_DEBUG:
+        try:
+            DEBUG_HTML_FILE.parent.mkdir(parents=True, exist_ok=True)
+            DEBUG_HTML_FILE.write_text(page.content(), encoding="utf-8")
+            log.info(f"HTML de la página guardado en {DEBUG_HTML_FILE} (solo diagnóstico local).")
+        except Exception as e:
+            log.warning(f"No se pudo guardar el HTML de diagnóstico: {e}")
+
+    # Limitar al máximo por sesión
+    total_vistos = len(perfiles)
+    perfiles = [p for p in perfiles
+                if p.get("profile_url") and memoria.huella_url(p["profile_url"]) not in conocidos][:MAX_PER_RUN]
+    log.info(f"{total_vistos} invitaciones visibles → {len(perfiles)} nuevas (tope {MAX_PER_RUN}).")
+
+    if ENRIQUECER and perfiles:
+        log.info("Leyendo cada perfil nuevo (una visita por persona)...")
+        enriquecer_perfiles(page, perfiles, dry_run=dry_run)
 
     log.info(f"Total extraídos: {len(perfiles)}")
-    for i, p in enumerate(perfiles):
-        log.info(
-            f"[{i+1}] {p['nombre']} | {p['cargo']} | "
-            f"{p['empresa']} | {p['conexiones_comun']} conexiones"
-        )
 
     if not perfiles:
         log.info("No se encontraron solicitudes pendientes.")
@@ -630,10 +644,6 @@ def scrape_invitations(dry_run: bool = False) -> list:
             encoding="utf-8",
         )
         log.info(f"✓ Guardado en {DATA_FILE}")
-    else:
-        print("\n── RESULTADO DRY-RUN ──────────────────────────────────")
-        print(json.dumps(perfiles, indent=2, ensure_ascii=False))
-
     return perfiles
 
 

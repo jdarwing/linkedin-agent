@@ -1,0 +1,26 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Invitaciones (ficticio)</title></head>
+<body><main>
+<h1>Invitaciones</h1><div>Recibidas (4)</div>
+<ul>
+ <li class="card"><a href="https://www.linkedin.com/in/ana-ficticia/?trk=x"><span>Ana Ficticia</span></a>
+   <p><span>Gerente de Calidad en Exportadora Uno</span></p>
+   <p><span>Beto Ejemplo y 62 contactos más en común</span></p>
+   <button>Ignorar</button><button>Aceptar</button></li>
+ <li class="card"><a href="https://www.linkedin.com/in/mariana-ficticia"><span>Mariana Ficticia</span></a>
+   <p><span>Compradora de fruta fresca</span></p>
+   <p><span>3 contactos en común</span></p>
+   <button>Ignorar</button><button>Aceptar</button></li>
+ <li class="card"><a href="https://www.linkedin.com/in/carlos-ficticio"><span>Carlos Ficticio</span></a>
+   <p><span>Director de operaciones</span></p>
+   <p><span>1.234 contactos en común</span></p>
+   <button>Ignorar</button><button>Aceptar</button></li>
+ <li class="card"><a href="https://www.linkedin.com/in/dora-ficticia"><span>Dora Ficticia</span></a>
+   <p><span>Analista</span></p>
+   <button>Ignorar</button><button>Aceptar</button></li>
+</ul>
+<button>Mostrar más</button>
+<script>
+  window.clics = [];
+  document.querySelectorAll('button').forEach(b => b.addEventListener('click', () => window.clics.push(b.innerText.trim())));
+</script>
+</main></body></html>

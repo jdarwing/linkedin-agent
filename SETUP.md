@@ -103,3 +103,35 @@ linkedin-agent/
 | 6    | `notifier.py`    | Envía email/Slack con los casos "consultar"   |
 | 7    | dry-run          | Corre en modo solo-lectura para calibrar      |
 | 8    | `runner.py`      | Orquesta todo + circuit breaker + cron        |
+
+---
+
+## Fase 0 · Cierre de seguridad (17-oct-2026)
+
+**El agente ya no acepta en LinkedIn (D7-A).** Lee las invitaciones nuevas, las evalúa y te
+consulta por correo con su recomendación. Lo que apruebas te vuelve como lista con enlaces
+para que lo aceptes tú en la app. El código del clic (`agent/actions.py`) se eliminó.
+
+**Pruebas** (no abren LinkedIn ni envían correos):
+
+    source .venv/bin/activate
+    python -m unittest discover -s tests -t .
+
+**Ensayo sin abrir LinkedIn** (usa `data/pending_requests.json`, llama al modelo, no envía nada):
+
+    python agent/runner.py --dry-run --skip-scraper
+    open data/email_preview.html
+
+**Claves en el llavero de macOS** (opcional, recomendado). Cada comando pide la clave sin mostrarla;
+después se puede borrar esa línea del `.env`:
+
+    security add-generic-password -U -s linkedin-agent -a OPENAI_API_KEY -w
+    security add-generic-password -U -s linkedin-agent -a SMTP_PASS -w
+
+**Inicio de sesión en LinkedIn:** `python agent/auth.py` abre la ventana y tú escribes la contraseña.
+Ya no se guarda en `.env`.
+
+**Códigos de salida de la corrida:** 0 normal · 1 DEGRADADA (te llega un aviso) · 2 DETENIDA · 3 en PAUSA.
+
+**Guardián:** si LinkedIn pide verificación o muestra un aviso, el agente crea el archivo `PAUSA`
+y te escribe. No vuelve a correr hasta que borres `PAUSA`.
