@@ -423,6 +423,25 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
 
 # ── Flujo principal ────────────────────────────────────────────────────────────
 
+NAVEGADOR_VISIBLE = os.getenv("NAVEGADOR_VISIBLE", "0") == "1"   # 1 = ventana visible (para diagnosticar)
+
+
+def abrir_navegador(p):
+    """
+    Por defecto, Chromium completo en modo invisible (headless "nuevo", sin ventana), para no
+    interrumpir el trabajo en la Mac. Es la misma versión de Chromium que la visible, no el
+    "headless shell" que LinkedIn detecta con más facilidad. Si falla, abre la ventana visible.
+    """
+    args = ["--disable-blink-features=AutomationControlled", "--window-size=1366,900"]
+    if not NAVEGADOR_VISIBLE:
+        try:
+            log.info("Navegador en segundo plano (sin ventana).")
+            return p.chromium.launch(channel="chromium", headless=True, slow_mo=50, args=args)
+        except Exception as e:
+            log.warning(f"No se pudo abrir en segundo plano ({e}); se usa ventana visible.")
+    return p.chromium.launch(headless=False, slow_mo=50, args=args)
+
+
 def scrape_invitations(dry_run: bool = False) -> list:
     if not SESSION_FILE.exists():
         log.error(f"No se encontró {SESSION_FILE}. Ejecuta 'python agent/auth.py' primero.")
@@ -431,11 +450,7 @@ def scrape_invitations(dry_run: bool = False) -> list:
     log.info("Iniciando extracción de solicitudes pendientes...")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=False,
-            slow_mo=50,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        browser = abrir_navegador(p)
         context = browser.new_context(
             storage_state=str(SESSION_FILE),
             viewport={"width": 1366, "height": 900},
