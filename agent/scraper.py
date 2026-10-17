@@ -314,32 +314,52 @@ JS_PERFIL = """
     if (!el) return out;
     for (const l of (el.innerText || '').split('\\n')) {
       const t = clean(l);
-      if (t && !out.includes(t)) out.push(t);
+      if (t && out[out.length - 1] !== t) out.push(t);
     }
     return out;
   };
-  const res = {experiencia_lineas: [], ubicacion: '', tiene_foto: false};
+  const res = {titular: '', empresa_cabecera: '', ubicacion: '', acerca_de: '',
+               experiencia_lineas: [], tiene_foto: false};
   const main = document.querySelector('main') || document.body;
-  let sec = null;
+  const secciones = Array.from(main.querySelectorAll('section'));
+  const titulo = s => { const h = s.querySelector('h2'); return h ? clean(h.innerText) : ''; };
+
+  // Cabecera: la sección que tiene "Información de contacto"
+  const top = secciones.find(s => /Información de contacto|Contact info/i.test(s.innerText || '')) || secciones[0];
+  const tl = lines(top);
+  const iC = tl.findIndex(t => /^(Información de contacto|Contact info)$/i.test(t));
+  if (iC > 0) {
+    let k = iC - 1;
+    while (k > 0 && /^[·•]$/.test(tl[k])) k--;
+    res.ubicacion = tl[k] || '';
+    const lineaEmpresa = tl[k - 1] || '';
+    if (lineaEmpresa.includes(' · ')) res.empresa_cabecera = lineaEmpresa.split(' · ')[0].replace(/\\s+y\\s+\\d+$|\\s+and\\s+\\d+$/i, '').trim();
+    // titular: primera línea larga después del nombre y del grado de conexión
+    res.titular = tl.slice(1, k - 1).find(t => t.length > 3 && !/^[·•]\\s*\\d|^[·•]$/.test(t)) || '';
+  }
+  res.tiene_foto = !!(top && top.querySelector('img[src*="profile-displayphoto"], img[srcset*="profile-displayphoto"]'));
+
+  const acerca = secciones.find(s => /^(Acerca de|About)$/i.test(titulo(s)));
+  if (acerca) res.acerca_de = lines(acerca).filter(t => !/^(Acerca de|About|…|más|more|see more|ver más)$/i.test(t)).join(' ').slice(0, 600);
+
+  let exp = null;
   const ancla = document.getElementById('experience');
-  if (ancla) sec = ancla.closest('section');
-  if (!sec) sec = Array.from(main.querySelectorAll('section')).find(s => {
-    const h = s.querySelector('h2');
-    return h && /^(Experiencia|Experience)\\b/i.test(clean(h.innerText));
-  });
-  if (sec) {
-    const li = sec.querySelector('li');
+  if (ancla) exp = ancla.closest('section');
+  if (!exp) exp = secciones.find(s => /^(Experiencia|Experience)$/i.test(titulo(s)));
+  if (exp) {
+    const li = exp.querySelector('li') || exp;
     res.experiencia_lineas = lines(li)
-      .filter(t => !/^(Experiencia|Experience|Mostrar|Show|Ver todo|See all)/i.test(t))
+      .filter(t => !/^(Experiencia|Experience|Mostrar|Show|Ver todo|See all|…|más)$/i.test(t))
+      .filter((t, i, a) => a.indexOf(t) === i)
       .slice(0, 8);
   }
-  const top = main.querySelector('section');
-  const tl = lines(top);
-  const iContacto = tl.findIndex(t => /Información de contacto|Contact info/i.test(t));
-  if (iContacto > 0) res.ubicacion = tl[iContacto - 1].replace(/[·•]\\s*$/, '').trim();
-  res.tiene_foto = !!(top && top.querySelector('img[src*="profile-displayphoto"]'));
   return res;
 }
+"""
+
+JS_HAY_EXPERIENCIA = """
+() => !!(document.getElementById('experience') ||
+  Array.from(document.querySelectorAll('main section h2')).some(h => /^(Experiencia|Experience)$/i.test((h.innerText || '').trim())))
 """
 
 _DURACION = re.compile(r"^\d+\s*(años?|mes(es)?|yrs?|years?|mos?|months?)\b", re.I)
@@ -371,22 +391,32 @@ def enriquecer_perfiles(page, perfiles: list, dry_run: bool = False) -> None:
             if any(x in page.url for x in ("login", "authwall", "checkpoint", "uas")):
                 log.warning("⚠ LinkedIn pidió verificación al visitar perfiles: se detiene el enriquecimiento.")
                 return
-            for _ in range(2):                                  # la sección Experiencia carga al bajar
-                page.evaluate("window.scrollBy(0, 900)")
-                time.sleep(random.uniform(1.0, 2.0))
+            for _ in range(10):                                 # la sección Experiencia carga al bajar
+                if page.evaluate(JS_HAY_EXPERIENCIA):
+                    break
+                page.evaluate("window.scrollBy(0, 1000)")
+                time.sleep(random.uniform(0.8, 1.6))
             datos = page.evaluate(JS_PERFIL)
-            perfil.update(interpretar_experiencia(datos.get("experiencia_lineas", [])))
+            exp = interpretar_experiencia(datos.get("experiencia_lineas", []))
+            perfil.update(exp)
+            # Respaldo: la cabecera del perfil muestra la empresa actual aunque no cargue Experiencia
+            if not perfil.get("empresa_actual") and datos.get("empresa_cabecera"):
+                perfil["empresa_actual"] = datos["empresa_cabecera"]
+            if not perfil.get("cargo_actual") and datos.get("titular"):
+                perfil["cargo_actual"] = ""                     # el titular ya va en 'cargo'; no se duplica
             perfil["experiencia_reciente"] = " | ".join(datos.get("experiencia_lineas", [])[:5])
             perfil["ubicacion"] = datos.get("ubicacion", "")
+            perfil["acerca_de"] = datos.get("acerca_de", "")
             perfil["tiene_foto"] = datos.get("tiene_foto", False)
             if dry_run and k == 1:
                 DEBUG_PERFIL_FILE.write_text(page.content(), encoding="utf-8")
             log.info(f"  [{k}/{len(perfiles)}] {perfil['nombre']}: "
-                     f"{perfil.get('cargo_actual') or '¿cargo?'} · {perfil.get('empresa_actual') or '¿empresa?'}")
+                     f"{perfil.get('cargo_actual') or '(cargo: ver titular)'} · {perfil.get('empresa_actual') or '¿empresa?'}"
+                     f"{' · ' + perfil['ubicacion'] if perfil.get('ubicacion') else ''}")
         except Exception as e:
             log.warning(f"  No se pudo leer el perfil de {perfil.get('nombre')}: {e}")
         time.sleep(random.uniform(4.0, 9.0))                    # ritmo humano entre perfiles
-    sin_datos = sum(1 for p in perfiles if not p.get("cargo_actual"))
+    sin_datos = sum(1 for p in perfiles if not (p.get("cargo_actual") or p.get("empresa_actual")))
     if perfiles and sin_datos > len(perfiles) / 2:
         log.warning(f"⚠ {sin_datos} de {len(perfiles)} perfiles sin cargo actual: revisar selectores (data/debug_perfil.html).")
 
