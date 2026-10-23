@@ -54,6 +54,40 @@ class Dom(Caso):
         self.assertEqual(page.evaluate(scraper.JS_LOAD_MORE), "mas")
         self.assertEqual(page.evaluate("window.clics"), ["Mostrar más"])
 
+    def test_hay_mas_solo_mira_y_no_pulsa(self):
+        page = self.pagina("invitaciones.html")
+        self.assertTrue(page.evaluate(scraper.JS_HAY_MAS))
+        self.assertEqual(page.evaluate("window.clics || []"), [])      # no pulsó nada
+
+    def _cargar(self, page, max_items=25):
+        original = scraper.human_pause
+        scraper.human_pause = lambda s: None
+        try:
+            scraper.DIAGNOSTICO.clear()
+            return scraper.scroll_and_wait(page, max_items)
+        finally:
+            scraper.human_pause = original
+
+    def test_lista_agotada_sin_total_da_cobertura_21oct(self):
+        # LinkedIn ya no muestra "Recibidas (N)": la cobertura se prueba porque la lista terminó
+        page = self.pagina("invitaciones.html")
+        page.evaluate("""() => document.querySelectorAll('button').forEach(b => {
+                             if (/más|more/i.test(b.innerText)) b.remove(); })""")
+        self.assertEqual(self._cargar(page), 4)
+        self.assertTrue(scraper.DIAGNOSTICO["lista_agotada"])
+
+    def test_con_mostrar_mas_pendiente_no_hay_cobertura(self):
+        page = self.pagina("invitaciones.html")
+        self._cargar(page)
+        self.assertFalse(scraper.DIAGNOSTICO["lista_agotada"])
+
+    def test_cortada_por_el_tope_no_hay_cobertura(self):
+        page = self.pagina("invitaciones.html")
+        page.evaluate("""() => document.querySelectorAll('button').forEach(b => {
+                             if (/más|more/i.test(b.innerText)) b.remove(); })""")
+        self._cargar(page, max_items=3)
+        self.assertFalse(scraper.DIAGNOSTICO["lista_agotada"])
+
     def test_perfil_en_una_sola_visita_D10(self):
         page = self.pagina("perfil.html")
         d = page.evaluate(scraper.JS_PERFIL)

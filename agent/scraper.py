@@ -241,6 +241,14 @@ JS_TOTAL = """
 }
 """
 
+# ¿Queda un botón "Mostrar más" activo? Solo lo busca; no pulsa nada.
+JS_HAY_MAS = """
+() => Array.from(document.querySelectorAll('button')).some(b => {
+  const t = (b.innerText || b.textContent || '').trim();
+  return !b.disabled && /^(mostrar|ver|cargar)\\s+más(\\s+invitaciones)?$|^(show|see|load)\\s+more(\\s+invitations)?$/i.test(t);
+})
+"""
+
 # Carga más tarjetas: lleva la última tarjeta a la vista (sirve aunque el scroll sea de un
 # contenedor interno y no de la ventana) y pulsa "Mostrar más"/"Show more" si existe.
 # Solo pulsa botones de paginación; nunca Aceptar/Ignorar.
@@ -287,9 +295,19 @@ def scroll_and_wait(page, max_items: int = MAX_PER_RUN) -> int:
         rondas += 1
         human_pause(1.5)
     final = page.evaluate(JS_COUNT_CARDS)
+    DIAGNOSTICO["lista_agotada"] = lista_agotada(stalls, final, max_items, page.evaluate(JS_HAY_MAS))
     log.info(f"Carga de tarjetas: {final} visibles tras {rondas} rondas "
              f"({clics_mas} clics en 'Mostrar más').")
     return final
+
+
+def lista_agotada(stalls: int, final: int, max_items: int, hay_mas: bool) -> bool:
+    """
+    La lista terminó de verdad: dejaron de aparecer tarjetas (4 rondas sin cambios),
+    no se cortó por el tope y no queda ningún botón "Mostrar más". LinkedIn ya no
+    muestra el total junto a "Recibidas" (oct-2026), así que esta es la prueba de cobertura.
+    """
+    return stalls >= 4 and final < max_items and not hay_mas
 
 
 # ── Perfiles ya conocidos (para leer solo solicitudes NUEVAS) ─────────────────
@@ -488,7 +506,7 @@ def scrape_invitations(dry_run: bool = False) -> list:
     log.info("Iniciando extracción de solicitudes pendientes...")
 
     DIAGNOSTICO.clear()
-    DIAGNOSTICO.update(alertas=[], urls_visibles=[], cobertura_completa=False)
+    DIAGNOSTICO.update(alertas=[], urls_visibles=[], cobertura_completa=False, lista_agotada=False)
 
     with sync_playwright() as p:
         browser = abrir_navegador(p)
@@ -553,6 +571,10 @@ def _leer(page, dry_run: bool) -> list:
         if len(perfiles) < esperado:
             DIAGNOSTICO["alertas"].append(f"Cobertura incompleta: se leyeron {len(perfiles)} de {esperado} invitaciones esperadas "
                                           f"({total_declarado} declaradas por LinkedIn).")
+    elif perfiles and DIAGNOSTICO.get("lista_agotada"):
+        DIAGNOSTICO["cobertura_completa"] = True
+        log.info(f"Cobertura completa: la lista terminó en {len(perfiles)} invitaciones "
+                 "(LinkedIn ya no muestra el total; se cargó hasta el final).")
     else:
         log.warning("⚠ No se pudo leer el total de invitaciones en la página; cobertura no verificable.")
         if not perfiles:

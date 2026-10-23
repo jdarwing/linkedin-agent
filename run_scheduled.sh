@@ -18,12 +18,19 @@ if [ -f "$PROJECT_DIR/PAUSA" ]; then
     exit 0
 fi
 
+# ── Mantener la Mac despierta mientras dure la corrida ────────────────────────
+# 19-oct-2026: la Mac se durmió durante la pausa aleatoria y la corrida nunca llegó a ejecutarse.
+# caffeinate se apaga solo cuando termina este script (-w $$).
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -i -s -w $$ &
+fi
+
 # ── Pausa aleatoria: 0–150 minutos (Fase 0, R6: horario variable) ─────────────
 # launchd arranca a las 12:30; la lectura real cae en cualquier momento entre 12:30 y 15:00
 SLEEP_SEC=$(( (RANDOM * 32768 + RANDOM) % 9000 ))
 [ "${SKIP_RANDOM_SLEEP:-0}" = "1" ] && SLEEP_SEC=0   # para pruebas manuales
 SLEEP_MIN=$(( SLEEP_SEC / 60 ))
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inicio — pausa aleatoria de ${SLEEP_MIN}m ${SLEEP_SEC}s antes de ejecutar..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Inicio — pausa aleatoria de ${SLEEP_MIN} min (${SLEEP_SEC} s) antes de ejecutar..."
 sleep "$SLEEP_SEC"
 
 # ── Activar entorno virtual ────────────────────────────────────────────────────
